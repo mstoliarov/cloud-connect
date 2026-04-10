@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = 11436;
-const OLLAMA_HOST = 'localhost';
+const OLLAMA_HOST = '127.0.0.1';
 const OLLAMA_PORT = process.platform === 'win32' ? 11434 : 11435;
 const CLOUD_HOST = 'api.anthropic.com';
 const HOME = process.env.HOME || process.env.USERPROFILE;
