@@ -5,7 +5,7 @@ const path = require('path');
 
 const PORT = 11436;
 const OLLAMA_HOST = 'localhost';
-const OLLAMA_PORT = 11435;
+const OLLAMA_PORT = process.platform === 'win32' ? 11434 : 11435;
 const CLOUD_HOST = 'api.anthropic.com';
 const HOME = process.env.HOME || process.env.USERPROFILE;
 const MODE_FILE = path.join(HOME, '.claude-provider-proxy', 'mode.txt');
