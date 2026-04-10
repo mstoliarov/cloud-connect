@@ -10,6 +10,18 @@ const CLOUD_HOST = 'api.anthropic.com';
 const HOME = process.env.HOME || process.env.USERPROFILE;
 const MODE_FILE = path.join(HOME, '.claude-provider-proxy', 'mode.txt');
 const LOG_FILE = path.join(HOME, '.claude-provider-proxy', 'proxy_internal.log');
+const CREDENTIALS_FILE = path.join(HOME, '.claude', '.credentials.json');
+
+// Read real OAuth token from Claude credentials file
+function getRealToken() {
+    try {
+        const creds = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'));
+        return creds?.claudeAiOauth?.accessToken || null;
+    } catch (e) {
+        log(`Warning: could not read credentials: ${e.message}`);
+        return null;
+    }
+}
 
 function log(message) {
     const msg = `[${new Date().toISOString()}] ${message}\n`;
@@ -41,8 +53,15 @@ function forwardTo(target, req, res, bodyBuffer) {
     if (isCloud) {
         headers['host'] = CLOUD_HOST;
         headers['user-agent'] = 'claude-code/2.1.100';
+        // Inject real OAuth token for cloud requests
+        const realToken = getRealToken();
+        if (realToken) {
+            headers['authorization'] = `Bearer ${realToken}`;
+        }
     } else {
         headers['host'] = `${OLLAMA_HOST}:${OLLAMA_PORT}`;
+        // Ollama doesn't need real auth
+        headers['authorization'] = 'Bearer ollama';
     }
 
     if (bodyBuffer) {
