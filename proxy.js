@@ -55,6 +55,7 @@ function forwardTo(target, req, res, bodyBuffer) {
         path: req.url,
         method: req.method,
         headers,
+        timeout: isCloud ? 120000 : 600000, // cloud: 2min, ollama: 10min (large models need time to load)
         ...(isCloud ? { protocol: 'https:' } : {})
     };
 
