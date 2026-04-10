@@ -4,12 +4,6 @@
 
 ## Как это работает
 
-Claude CLI настраивается на отправку запросов не напрямую к Anthropic, а через локальный прокси-сервер на порту `11436`. Прокси анализирует каждый запрос и маршрутизирует его автоматически:
-
-- Модели `claude-*` (Sonnet, Opus, Haiku) → **Anthropic Cloud API**
-- Модели Ollama (`gemma4`, `glm` и др.) → **локальный Ollama** (порт `11435`)
-- Запрос `/v1/models` → **объединённый список** моделей из обоих источников
-
 ```
 Claude CLI
     │
@@ -17,15 +11,22 @@ Claude CLI
 cloud-connect proxy (порт 11436)
     │
     ├─── claude-* ──────────────────────► Anthropic Cloud API
-    │                                      (api.anthropic.com)
-    └─── gemma4, glm, и др. ───────────► Ollama
-                                          (localhost:11435)
+    │                                      (реальный OAuth-токен из credentials.json)
+    └─── gemma4, qwen, gpt-oss, и др. ─► Ollama
+                                          (localhost:11434 / 11435)
 ```
+
+- Модели `claude-*` → **Anthropic Cloud** (автоматически)
+- Остальные модели → **Ollama** (автоматически)
+- `/v1/models` → **объединённый список** из обоих источников
+- Реальный OAuth-токен подставляется прокси для облачных запросов
+
+---
 
 ## Требования
 
 - Node.js v18+
-- [Ollama](https://ollama.com) — установлен и запущен на порту `11435`
+- [Ollama](https://ollama.com) — запущен локально
 - Claude CLI — авторизован через `claude /login`
 
 ---
@@ -36,15 +37,10 @@ cloud-connect proxy (порт 11436)
 
 ```bash
 git clone https://github.com/mstoliarov/cloud-connect.git ~/.claude-provider-proxy
-```
-
-### 2. Создать файл режима
-
-```bash
 echo "ollama" > ~/.claude-provider-proxy/mode.txt
 ```
 
-### 3. Установить вспомогательные скрипты
+### 2. Установить вспомогательные скрипты
 
 ```bash
 mkdir -p ~/bin
@@ -53,33 +49,29 @@ cp ~/.claude-provider-proxy/switch-to-ollama ~/bin/switch-to-ollama
 chmod +x ~/bin/switch-to-cloud ~/bin/switch-to-ollama
 ```
 
-### 4. Запустить прокси-сервер
+### 3. Настроить окружение
 
-```bash
-node ~/.claude-provider-proxy/proxy.js &
-```
-
-Для автозапуска при старте системы добавьте в `~/.bashrc`:
+Добавить в `~/.bashrc`:
 
 ```bash
 # Claude Provider Proxy
+export ANTHROPIC_BASE_URL=http://localhost:11436
+export ANTHROPIC_AUTH_TOKEN=ollama
+
+# Автозапуск прокси
 if ! ss -tulpn | grep -q ':11436'; then
   node ~/.claude-provider-proxy/proxy.js > ~/.claude-provider-proxy/proxy.log 2>&1 &
 fi
 ```
 
-### 5. Настроить Claude CLI
-
-Для удобства добавьте алиас в `~/.bashrc`:
-
-```bash
-alias claude='ANTHROPIC_BASE_URL=http://localhost:11436 claude'
-```
-
-После изменения `~/.bashrc`:
-
 ```bash
 source ~/.bashrc
+```
+
+### 4. Запустить
+
+```bash
+claude
 ```
 
 ---
@@ -88,64 +80,86 @@ source ~/.bashrc
 
 ### 1. Клонировать репозиторий
 
-Открой **PowerShell** и выполни:
-
 ```powershell
-git clone https://github.com/mstoliarov/cloud-connect.git "$env:USERPROFILE\.claude-provider-proxy"
-```
-
-### 2. Создать файл режима
-
-```powershell
+git clone -b windows-support https://github.com/mstoliarov/cloud-connect.git "$env:USERPROFILE\.claude-provider-proxy"
 "ollama" | Out-File "$env:USERPROFILE\.claude-provider-proxy\mode.txt" -Encoding ascii
 ```
 
-### 3. Запустить прокси-сервер
-
-**Вариант A — в окне терминала** (для тестирования):
-```bat
-start-proxy.bat
-```
-
-**Вариант B — в фоне** (рекомендуется):
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude-provider-proxy\start-proxy-background.ps1"
-```
-
-Для автозапуска при входе в систему через **Task Scheduler**:
-1. Открой `Task Scheduler` → `Create Basic Task`
-2. Trigger: `When I log on`
-3. Action: `Start a program`
-4. Program: `powershell`
-5. Arguments: `-ExecutionPolicy Bypass -File "%USERPROFILE%\.claude-provider-proxy\start-proxy-background.ps1"`
-
-### 4. Настроить Claude CLI
-
-Добавь переменную окружения через PowerShell (один раз, навсегда):
+### 2. Настроить переменные окружения (один раз)
 
 ```powershell
+# Направить Claude CLI через прокси
 [System.Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "http://localhost:11436", "User")
+
+# Фиктивный токен заставляет CLI слать все запросы через прокси.
+# Реальный OAuth-токен прокси подставляет сам из credentials.json
+[System.Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "ollama", "User")
 ```
 
-После этого **перезапусти терминал** и просто запускай:
+### 3. Настроить автозапуск прокси через Task Scheduler
 
 ```powershell
+$action = New-ScheduledTaskAction `
+    -Execute "node" `
+    -Argument "`"$env:USERPROFILE\.claude-provider-proxy\proxy.js`"" `
+    -WorkingDirectory "$env:USERPROFILE\.claude-provider-proxy"
+
+$trigger = New-ScheduledTaskTrigger -AtLogon
+
+$settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit 0 `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1)
+
+Register-ScheduledTask `
+    -TaskName "ClaudeProviderProxy" `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -RunLevel Highest `
+    -Force
+
+# Запустить прямо сейчас
+Start-ScheduledTask -TaskName "ClaudeProviderProxy"
+```
+
+### 4. Запустить Claude
+
+Перезапусти терминал (чтобы подхватить новые переменные окружения) и:
+
+```powershell
+# Облачная модель Anthropic
 claude
+
+# Локальная модель Ollama
+claude --model gemma3:1b
+claude --model qwen3-coder:480b-cloud
 ```
 
 ---
 
 ## Использование
 
-### Переключение режима (опционально)
+### Выбор модели
 
-Маршрутизация происходит **автоматически** по имени модели.  
-Режим влияет только на запросы без явно указанной модели.
+```
+/model              # Выбор из облачных (Sonnet, Opus, Haiku)
+```
+
+Для Ollama-моделей — указывай при запуске:
+
+```powershell
+claude --model <имя-модели>
+```
+
+### Переключение режима по умолчанию (опционально)
+
+Маршрутизация автоматическая по имени модели. Режим — резервный для запросов без модели.
 
 **Linux / macOS:**
 ```bash
-switch-to-cloud   # Переключиться на облако
-switch-to-ollama  # Переключиться на Ollama
+switch-to-cloud
+switch-to-ollama
 ```
 
 **Windows:**
@@ -154,11 +168,40 @@ switch-to-cloud.bat
 switch-to-ollama.bat
 ```
 
-### Выбор модели в Claude CLI
+---
 
+## Обновление
+
+**Linux / macOS:**
+```bash
+cd ~/.claude-provider-proxy && git pull origin master
 ```
-/model gemma4:31b-cloud    # Локальная модель через Ollama
-/model                     # Вернуться к облачной модели по умолчанию
+
+**Windows:**
+```powershell
+cd "$env:USERPROFILE\.claude-provider-proxy"
+git pull origin windows-support
+Stop-ScheduledTask -TaskName "ClaudeProviderProxy"
+Start-ScheduledTask -TaskName "ClaudeProviderProxy"
+```
+
+---
+
+## Логи
+
+```powershell
+# Windows
+cat "$env:USERPROFILE\.claude-provider-proxy\proxy_internal.log" | Select-Object -Last 20
+
+# Linux / macOS
+tail -20 ~/.claude-provider-proxy/proxy_internal.log
+```
+
+Пример записей:
+```
+[2026-04-11T10:00:01.000Z] POST /v1/messages | model: claude-sonnet-4-6       | target: cloud
+[2026-04-11T10:00:05.000Z] POST /v1/messages | model: qwen3-coder:480b-cloud  | target: ollama
+[2026-04-11T10:00:06.000Z] Models merged: 3 cloud + 8 ollama
 ```
 
 ---
@@ -166,28 +209,16 @@ switch-to-ollama.bat
 ## Файловая структура
 
 ```
-~/.claude-provider-proxy/              (Linux/macOS)
-%USERPROFILE%\.claude-provider-proxy\  (Windows)
-├── proxy.js                   # Основной прокси-сервер (кроссплатформенный)
-├── mode.txt                   # Текущий режим: "cloud" или "ollama"
-├── switch-to-cloud            # Скрипт переключения (Linux/macOS)
-├── switch-to-ollama           # Скрипт переключения (Linux/macOS)
-├── switch-to-cloud.bat        # Скрипт переключения (Windows)
-├── switch-to-ollama.bat       # Скрипт переключения (Windows)
-├── start-proxy.bat            # Запуск прокси в терминале (Windows)
-├── start-proxy-background.ps1 # Запуск прокси в фоне (Windows)
-└── proxy_internal.log         # Внутренний лог прокси
-```
-
----
-
-## Логи
-
-Прокси пишет детальный лог в `proxy_internal.log`:
-
-```
-[2026-04-10T17:51:06.020Z] POST /v1/messages | model: claude-sonnet-4-6 | target: cloud
-[2026-04-10T17:51:14.230Z] POST /v1/messages | model: gemma4:31b-cloud   | target: ollama
+~/.claude-provider-proxy/
+├── proxy.js                   # Прокси-сервер (кроссплатформенный)
+├── mode.txt                   # Режим по умолчанию: "cloud" или "ollama"
+├── switch-to-cloud            # (Linux/macOS)
+├── switch-to-ollama           # (Linux/macOS)
+├── switch-to-cloud.bat        # (Windows)
+├── switch-to-ollama.bat       # (Windows)
+├── start-proxy.bat            # Запуск в терминале (Windows)
+├── start-proxy-background.ps1 # Запуск в фоне (Windows)
+└── proxy_internal.log         # Лог запросов
 ```
 
 ---
@@ -195,5 +226,5 @@ switch-to-ollama.bat
 ## Используемые технологии
 
 - **Node.js** — прокси-сервер (встроенные модули `http`, `https`, `fs`)
-- **Ollama** — локальный сервер для запуска открытых моделей
-- **Anthropic Claude API** — облачные модели через OAuth-авторизацию Claude CLI
+- **Ollama** — локальный сервер для открытых моделей
+- **Anthropic Claude API** — облачные модели через OAuth-авторизацию
