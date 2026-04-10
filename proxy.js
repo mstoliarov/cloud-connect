@@ -7,8 +7,9 @@ const PORT = 11436;
 const OLLAMA_HOST = 'localhost';
 const OLLAMA_PORT = 11435;
 const CLOUD_HOST = 'api.anthropic.com';
-const MODE_FILE = path.join(process.env.HOME, '.claude-provider-proxy/mode.txt');
-const LOG_FILE = path.join(process.env.HOME, '.claude-provider-proxy/proxy_internal.log');
+const HOME = process.env.HOME || process.env.USERPROFILE;
+const MODE_FILE = path.join(HOME, '.claude-provider-proxy', 'mode.txt');
+const LOG_FILE = path.join(HOME, '.claude-provider-proxy', 'proxy_internal.log');
 
 function log(message) {
     const msg = `[${new Date().toISOString()}] ${message}\n`;

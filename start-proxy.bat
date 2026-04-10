@@ -1,0 +1,3 @@
+@echo off
+echo Starting Claude Provider Proxy on port 11436...
+node "%USERPROFILE%\.claude-provider-proxy\proxy.js"
