@@ -32,20 +32,70 @@ function getTargetForModel(modelName, mode) {
     return 'ollama';
 }
 
+// Strip thinking-related fields for Ollama requests (Ollama doesn't support signature field)
+function sanitizeForOllama(bodyBuffer, reqHeaders) {
+    try {
+        const parsed = JSON.parse(bodyBuffer.toString());
+        let modified = false;
+
+        // Remove thinking parameter
+        if (parsed.thinking) {
+            delete parsed.thinking;
+            modified = true;
+        }
+
+        // Remove betas that Ollama doesn't support
+        if (parsed.betas) {
+            parsed.betas = parsed.betas.filter(b => !b.includes('thinking'));
+            if (parsed.betas.length === 0) delete parsed.betas;
+            modified = true;
+        }
+
+        if (modified) {
+            log(`[Ollama] Stripped thinking params from request`);
+            return Buffer.from(JSON.stringify(parsed));
+        }
+    } catch (e) {
+        // Not JSON or parse error — return as-is
+    }
+    return bodyBuffer;
+}
+
+// Strip thinking-related beta headers for Ollama
+function sanitizeHeadersForOllama(headers) {
+    const result = { ...headers };
+    if (result['anthropic-beta']) {
+        const betas = result['anthropic-beta'].split(',').map(s => s.trim())
+            .filter(b => !b.includes('thinking') && !b.includes('interleaved'));
+        if (betas.length > 0) {
+            result['anthropic-beta'] = betas.join(',');
+        } else {
+            delete result['anthropic-beta'];
+        }
+    }
+    return result;
+}
+
 // Forward request to the specified target
 function forwardTo(target, req, res, bodyBuffer) {
     const isCloud = target === 'cloud';
-    const headers = { ...req.headers };
+    let headers = { ...req.headers };
+    let actualBody = bodyBuffer;
 
     if (isCloud) {
         headers['host'] = CLOUD_HOST;
         headers['user-agent'] = 'claude-code/2.1.100';
     } else {
         headers['host'] = `${OLLAMA_HOST}:${OLLAMA_PORT}`;
+        // Strip thinking for Ollama — it doesn't return required 'signature' field
+        if (actualBody) {
+            actualBody = sanitizeForOllama(actualBody, headers);
+        }
+        headers = sanitizeHeadersForOllama(headers);
     }
 
-    if (bodyBuffer) {
-        headers['content-length'] = bodyBuffer.length;
+    if (actualBody) {
+        headers['content-length'] = actualBody.length;
     }
 
     const options = {
@@ -58,11 +108,13 @@ function forwardTo(target, req, res, bodyBuffer) {
     };
 
     const proxyReq = (isCloud ? https : http).request(options, (proxyRes) => {
+        const label = isCloud ? 'Cloud' : 'Ollama';
+        log(`[${label} Response] status=${proxyRes.statusCode} url=${req.url}`);
         if (proxyRes.statusCode >= 400) {
             let errBody = '';
             proxyRes.on('data', chunk => errBody += chunk);
             proxyRes.on('end', () => {
-                log(`[${isCloud ? 'Cloud' : 'Ollama'} Error] ${proxyRes.statusCode} | ${errBody.slice(0, 200)}`);
+                log(`[${label} Error Body] ${errBody.slice(0, 300)}`);
             });
         }
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
@@ -77,8 +129,8 @@ function forwardTo(target, req, res, bodyBuffer) {
         }
     });
 
-    if (bodyBuffer) {
-        proxyReq.end(bodyBuffer);
+    if (actualBody) {
+        proxyReq.end(actualBody);
     } else {
         req.pipe(proxyReq);
     }
