@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloud-Connect Proxy for Claude CLI
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/node /root/.claude-provider-proxy/proxy.js
+WorkingDirectory=/root/.claude-provider-proxy
+Restart=on-failure
+RestartSec=3
+Environment=HOME=/root
+EnvironmentFile=-/root/.claude-provider-proxy/proxy.env
+
+[Install]
+WantedBy=multi-user.target

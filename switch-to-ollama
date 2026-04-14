@@ -1,3 +1,0 @@
-#!/bin/bash
-echo "ollama" > ~/.claude-provider-proxy/mode.txt
-echo "Switched to OLLAMA provider"

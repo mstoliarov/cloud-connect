@@ -1,0 +1,6 @@
+proxy.env
+proxy.log
+proxy_internal.log
+mode.txt
+plan.md
+*.bak

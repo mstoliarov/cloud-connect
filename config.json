@@ -1,0 +1,32 @@
+{
+  "port": 11436,
+  "defaultProvider": "ollama",
+
+  "ollama": {
+    "host": "127.0.0.1",
+    "port": 11435,
+    "portWindows": 11434
+  },
+
+  "providers": {
+    "huggingface": {
+      "prefix": "hf-",
+      "host": "router.huggingface.co",
+      "path": "/v1/chat/completions",
+      "apiKeyEnv": "HF_TOKEN",
+      "maxTokens": 4096
+    },
+    "openrouter": {
+      "prefix": "or-",
+      "host": "openrouter.ai",
+      "path": "/api/v1/chat/completions",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
+    },
+    "groq": {
+      "prefix": "groq-",
+      "host": "api.groq.com",
+      "path": "/openai/v1/chat/completions",
+      "apiKeyEnv": "GROQ_API_KEY"
+    }
+  }
+}

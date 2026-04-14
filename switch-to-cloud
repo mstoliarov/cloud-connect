@@ -1,3 +1,0 @@
-#!/bin/bash
-echo "cloud" > ~/.claude-provider-proxy/mode.txt
-echo "Switched to CLOUD provider"
