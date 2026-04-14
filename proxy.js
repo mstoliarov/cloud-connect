@@ -305,6 +305,122 @@ function sanitizeHeadersForOllama(headers) {
     return result;
 }
 
+// ── Thinking support for Ollama (whitelist + signature injection) ───────────
+
+function modelSupportsThinking(modelName) {
+    if (!modelName) return false;
+    const list = CONFIG.ollama?.thinkingSupported || [];
+    return list.some(entry => modelName === entry || modelName.startsWith(entry));
+}
+
+function generateSignature() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let sig = '';
+    for (let i = 0; i < 180; i++) sig += chars[Math.floor(Math.random() * chars.length)];
+    return sig;
+}
+
+function injectSignatureIntoOllamaJson(bodyStr) {
+    try {
+        const parsed = JSON.parse(bodyStr);
+        if (!parsed.content || !Array.isArray(parsed.content)) return bodyStr;
+        let modified = false;
+        for (const block of parsed.content) {
+            if (block.type === 'thinking' && !block.signature) {
+                block.signature = generateSignature();
+                modified = true;
+            }
+        }
+        if (modified) {
+            log('[Ollama] Injected signature into thinking block (non-streaming)');
+            return JSON.stringify(parsed);
+        }
+    } catch (e) { /* not JSON — pass through */ }
+    return bodyStr;
+}
+
+function pipeOllamaStreamWithSignature(upstream, downstream) {
+    let buf = '';
+    const thinkingBlocks = new Set();
+
+    upstream.on('data', chunk => {
+        buf += chunk.toString();
+        const events = buf.split('\n\n');
+        buf = events.pop();
+
+        for (const rawEvent of events) {
+            if (!rawEvent) continue;
+
+            let dataLine = null;
+            for (const line of rawEvent.split('\n')) {
+                if (line.startsWith('data:')) { dataLine = line.slice(5).trim(); break; }
+            }
+
+            let data = null;
+            if (dataLine) { try { data = JSON.parse(dataLine); } catch (e) {} }
+
+            if (data?.type === 'content_block_start' && data.content_block?.type === 'thinking') {
+                thinkingBlocks.add(data.index);
+            }
+
+            if (data?.type === 'content_block_stop' && thinkingBlocks.has(data.index)) {
+                const sigEvent = {
+                    type: 'content_block_delta',
+                    index: data.index,
+                    delta: { type: 'signature_delta', signature: generateSignature() },
+                };
+                downstream.write(`event: content_block_delta\ndata: ${JSON.stringify(sigEvent)}\n\n`);
+                thinkingBlocks.delete(data.index);
+                log(`[Ollama] Injected signature_delta for thinking block ${data.index}`);
+            }
+
+            downstream.write(rawEvent + '\n\n');
+        }
+    });
+
+    upstream.on('end', () => {
+        if (buf) downstream.write(buf);
+        downstream.end();
+    });
+
+    upstream.on('error', (err) => {
+        log(`[Ollama Stream Error] ${err.message}`);
+        if (!downstream.writableEnded) downstream.end();
+    });
+}
+
+// ── Sanitize history before cloud (strip fake thinking signatures) ──────────
+
+// When the user switches from an Ollama thinking-capable model back to Claude,
+// the conversation history contains thinking blocks with signatures we fabricated
+// (180 chars of [A-Za-z0-9+/]). Anthropic rejects these with 400. Also strip
+// thinking blocks missing a signature entirely.
+function sanitizeBodyForCloud(bodyBuffer) {
+    try {
+        const parsed = JSON.parse(bodyBuffer.toString());
+        if (!Array.isArray(parsed.messages)) return bodyBuffer;
+        let stripped = 0;
+        for (const msg of parsed.messages) {
+            if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+            const before = msg.content.length;
+            msg.content = msg.content.filter(block => {
+                if (block.type !== 'thinking') return true;
+                const sig = block.signature || '';
+                if (!sig) return false;
+                // Our injection fingerprint: exactly 180 chars from base64 alphabet
+                if (sig.length === 180 && /^[A-Za-z0-9+/]+$/.test(sig)) return false;
+                return true;
+            });
+            stripped += before - msg.content.length;
+        }
+        if (stripped > 0) {
+            log(`[Cloud] Stripped ${stripped} fake/empty-signature thinking block(s) from history`);
+            return Buffer.from(JSON.stringify(parsed));
+        }
+    } catch (e) { /* not JSON — pass through */ }
+    return bodyBuffer;
+}
+
 // ── Forward to Anthropic Cloud (passthrough) ────────────────────────────────
 
 function forwardToCloud(req, res, bodyBuffer) {
@@ -316,7 +432,10 @@ function forwardToCloud(req, res, bodyBuffer) {
     const token = getOAuthToken();
     if (token) headers['authorization'] = `Bearer ${token}`;
 
-    if (bodyBuffer) headers['content-length'] = bodyBuffer.length;
+    if (bodyBuffer) {
+        bodyBuffer = sanitizeBodyForCloud(bodyBuffer);
+        headers['content-length'] = bodyBuffer.length;
+    }
 
     const options = {
         hostname: CLOUD_HOST, port: 443, path: req.url,
@@ -352,9 +471,22 @@ function forwardToOllama(req, res, bodyBuffer) {
     headers['host'] = `${OLLAMA_HOST}:${OLLAMA_PORT}`;
     headers['authorization'] = 'Bearer ollama';
 
+    // Detect model and whether it supports thinking
+    let modelName = null;
+    try {
+        const parsed = JSON.parse((bodyBuffer || Buffer.from('{}')).toString());
+        modelName = parsed.model || null;
+    } catch (e) { /* ignore */ }
+    const thinkingMode = modelSupportsThinking(modelName);
+
     let actualBody = bodyBuffer;
     if (actualBody) {
-        actualBody = sanitizeBodyForOllama(actualBody);
+        // Only strip thinking params if model does NOT support thinking
+        if (!thinkingMode) {
+            actualBody = sanitizeBodyForOllama(actualBody);
+        } else {
+            log(`[Ollama] Thinking mode enabled for model: ${modelName}`);
+        }
         headers['content-length'] = actualBody.length;
     }
     headers = sanitizeHeadersForOllama(headers);
@@ -370,9 +502,38 @@ function forwardToOllama(req, res, bodyBuffer) {
             let errBody = '';
             proxyRes.on('data', c => errBody += c);
             proxyRes.on('end', () => log(`[Ollama Error] ${errBody.slice(0, 300)}`));
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            proxyRes.pipe(res);
+            return;
         }
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-        proxyRes.pipe(res);
+
+        if (thinkingMode) {
+            const contentType = proxyRes.headers['content-type'] || '';
+            const isStream = contentType.includes('event-stream');
+
+            if (isStream) {
+                res.writeHead(proxyRes.statusCode, proxyRes.headers);
+                pipeOllamaStreamWithSignature(proxyRes, res);
+            } else {
+                // Buffer, inject signature, send
+                let body = '';
+                proxyRes.on('data', c => body += c);
+                proxyRes.on('end', () => {
+                    const transformed = injectSignatureIntoOllamaJson(body);
+                    const outHeaders = { ...proxyRes.headers };
+                    outHeaders['content-length'] = Buffer.byteLength(transformed);
+                    res.writeHead(proxyRes.statusCode, outHeaders);
+                    res.end(transformed);
+                });
+                proxyRes.on('error', (err) => {
+                    log(`[Ollama Response Error] ${err.message}`);
+                    if (!res.writableEnded) res.end();
+                });
+            }
+        } else {
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            proxyRes.pipe(res);
+        }
     });
 
     proxyReq.on('error', (err) => {
