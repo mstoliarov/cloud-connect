@@ -243,8 +243,11 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.Comm
 Stop-ScheduledTask  -TaskName "CloudConnectProxy" -TaskPath "\CloudConnect\"
 Start-ScheduledTask -TaskName "CloudConnectProxy" -TaskPath "\CloudConnect\"
 
-# Логи (live)
+# Логи активности (routing, OAuth, ошибки API)
 Get-Content "$env:USERPROFILE\.claude-provider-proxy\proxy_internal.log" -Tail 20 -Wait
+
+# Логи запуска (если прокси не стартует)
+Get-Content "$env:USERPROFILE\.claude-provider-proxy\proxy_err.log" -Tail 20 -Wait
 ```
 
 ---
