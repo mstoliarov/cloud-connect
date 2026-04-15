@@ -1,25 +1,25 @@
-# Start Claude Provider Proxy in the background (PowerShell)
-$proxyDir = "$env:USERPROFILE\.claude-provider-proxy"
-$proxyScript = "$proxyDir\proxy.js"
-$logFile = "$proxyDir\proxy.log"
+# start-proxy-background.ps1
+# Called by Task Scheduler at user logon.
+# Starts the cloud-connect proxy hidden; exits immediately if already running.
 
-# Check if proxy is already running
-$running = Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -match "proxy.js"
-}
+$proxyDir  = "$env:USERPROFILE\.claude-provider-proxy"
+$proxyScript = "$proxyDir\proxy.js"
+$logFile   = "$proxyDir\proxy.log"
+$errFile   = "$proxyDir\proxy_err.log"
+
+# Use CIM (not Get-Process) because only Win32_Process exposes CommandLine
+$running = Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+    Where-Object { $_.CommandLine -like "*proxy.js*" }
 
 if ($running) {
-    Write-Host "Proxy is already running (PID: $($running.Id))"
     exit 0
 }
 
-# Start proxy in background
-Start-Process -FilePath "node" `
+# WindowStyle Hidden creates an invisible window — no console flickers at logon.
+# stdout and stderr must go to SEPARATE files; same file causes a sharing violation.
+Start-Process -FilePath "node.exe" `
     -ArgumentList "`"$proxyScript`"" `
+    -WorkingDirectory $proxyDir `
     -RedirectStandardOutput $logFile `
-    -RedirectStandardError $logFile `
-    -WindowStyle Hidden `
-    -NoNewWindow:$false
-
-Write-Host "Claude Provider Proxy started on port 11436"
-Write-Host "Log: $logFile"
+    -RedirectStandardError $errFile `
+    -WindowStyle Hidden
