@@ -182,7 +182,8 @@ claude --model groq-llama3-70b-8192
   "ollama": {
     "host": "127.0.0.1",
     "port": 11435,
-    "portWindows": 11434
+    "portWindows": 11434,
+    "thinkingSupported": ["deepseek-r1", "qwq"]
   },
   "providers": {
     "huggingface": { "prefix": "hf-", "host": "router.huggingface.co", ... },
@@ -191,6 +192,12 @@ claude --model groq-llama3-70b-8192
   }
 }
 ```
+
+#### `ollama.thinkingSupported`
+
+Список Ollama-моделей (или их префиксов), которые поддерживают thinking-блоки в формате Anthropic. Для таких моделей прокси **не стрипает** параметр `thinking` из запроса и **инжектирует** случайную `signature` в thinking-блоки ответа (Ollama не возвращает `signature`, но Claude CLI требует её наличия).
+
+При переключении обратно на Claude-модель (`/model`) прокси автоматически вычищает эти сгенерированные подписи из истории диалога — иначе Anthropic API вернул бы `400 Invalid signature in thinking block`.
 
 ### `proxy.env` — API ключи (не коммитится)
 
@@ -254,7 +261,8 @@ sudo systemctl restart cloud-connect
 
 ## Заметки
 
-- `effortLevel` в `~/.claude/settings.json` ломает переключение через `/model` для не-Claude моделей. Если нужен thinking — используйте `/effort high` в сессии или `--effort high` при запуске.
+- `effortLevel` в `~/.claude/settings.json` не ломает переключение через `/model` для не-Claude моделей — прокси автоматически стрипает `thinking` из запросов к провайдерам, которые его не поддерживают.
+- При переключении с Ollama thinking-модели обратно на Claude прокси чистит историю от фейковых signatures — потеря контекста не нужна.
 - HuggingFace модели имеют ограниченный контекст — `max_tokens` капится до 4096 (настраивается в config.json).
 - Для OpenRouter добавлены заголовки `HTTP-Referer` и `X-Title` — требования провайдера.
 - Список моделей (`/v1/models`) собирается параллельно из всех провайдеров с активными ключами, по 50 моделей на провайдера.
