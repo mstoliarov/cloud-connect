@@ -76,21 +76,145 @@ function log(message) {
     try { fs.appendFileSync(LOG_FILE, msg); } catch (e) { /* ignore */ }
 }
 
-// ── OAuth credentials ───────────────────────────────────────────────────────
+// ── OAuth credentials (cached, with expiry check) ──────────────────────────
 
-function getOAuthToken() {
+let _oauthCache = { token: null, expiresAt: 0, readAt: 0 };
+const OAUTH_CACHE_TTL_MS = 60_000; // re-read file at most once per minute
+const ANTHROPIC_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+
+async function refreshOAuthToken() {
+    log('[OAuth] Attempting to refresh token...');
     try {
         const creds = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'));
-        return creds?.claudeAiOauth?.accessToken || null;
+        const refreshToken = creds?.claudeAiOauth?.refreshToken;
+        if (!refreshToken) {
+            log('[OAuth] No refresh token found in credentials file');
+            return null;
+        }
+
+        // Use manual construction to avoid any environment issues
+        const body = `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}&client_id=${encodeURIComponent(ANTHROPIC_CLIENT_ID)}`;
+
+        const options = {
+            hostname: CLOUD_HOST,
+            port: 443,
+            path: '/v1/oauth/token',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(body),
+                'anthropic-beta': 'oauth-2025-04-20',
+            },
+        };
+
+        return new Promise((resolve) => {
+            const req = https.request(options, (res) => {
+                let resBody = '';
+                res.on('data', chunk => resBody += chunk);
+                res.on('end', () => {
+                    if (res.statusCode === 200) {
+                        try {
+                            const data = JSON.parse(resBody);
+                            if (data.access_token) {
+                                log('[OAuth] Successfully refreshed token');
+                                // Update credentials file
+                                creds.claudeAiOauth.accessToken = data.access_token;
+                                if (data.refresh_token) creds.claudeAiOauth.refreshToken = data.refresh_token;
+                                if (data.expires_in) {
+                                    creds.claudeAiOauth.expiresAt = Date.now() + (data.expires_in * 1000);
+                                }
+                                fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2));
+                                
+                                // Update cache
+                                _oauthCache = { 
+                                    token: data.access_token, 
+                                    expiresAt: creds.claudeAiOauth.expiresAt, 
+                                    readAt: Date.now() 
+                                };
+                                resolve(data.access_token);
+                            } else {
+                                log(`[OAuth] Refresh response missing access_token: ${resBody}`);
+                                resolve(null);
+                            }
+                        } catch (e) {
+                            log(`[OAuth] Failed to parse refresh response: ${e.message}`);
+                            resolve(null);
+                        }
+                    } else {
+                        log(`[OAuth] Refresh failed with status ${res.statusCode}: ${resBody}`);
+                        resolve(null);
+                    }
+                });
+            });
+            req.on('error', (e) => {
+                log(`[OAuth] Refresh request error: ${e.message}`);
+                resolve(null);
+            });
+            req.end(body);
+        });
     } catch (e) {
+        log(`[OAuth] Unexpected refresh error: ${e.message}`);
         return null;
     }
+}
+
+function getOAuthToken() {
+    const now = Date.now();
+    // Use cached value if still fresh and not expired
+    if (_oauthCache.token && now < _oauthCache.readAt + OAUTH_CACHE_TTL_MS) {
+        if (_oauthCache.expiresAt && now >= _oauthCache.expiresAt - 300_000) {
+            log('[OAuth] Token expires in <5min — will attempt refresh on 401');
+        }
+        return _oauthCache.token;
+    }
+    try {
+        const creds = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'));
+        const oauth = creds?.claudeAiOauth;
+        const token = oauth?.accessToken || null;
+        const expiresAt = oauth?.expiresAt || 0;
+        if (expiresAt && now >= expiresAt) {
+            log(`[OAuth] Token expired at ${new Date(expiresAt).toISOString()} — will attempt refresh on 401`);
+        }
+        _oauthCache = { token, expiresAt, readAt: now };
+        return token;
+    } catch (e) {
+        log(`[OAuth] Failed to read credentials: ${e.message}`);
+        return null;
+    }
+}
+
+// ── Log rotation (cap at 5 MB) ──────────────────────────────────────────────
+
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+let _logSize = 0;
+try { _logSize = fs.statSync(LOG_FILE).size; } catch (e) { /* new file */ }
+
+function log(message) {
+    const msg = `[${new Date().toISOString()}] ${message}\n`;
+    const msgLen = Buffer.byteLength(msg);
+    if (_logSize + msgLen > LOG_MAX_BYTES) {
+        try {
+            // Keep last 2 MB on rotation
+            const keep = 2 * 1024 * 1024;
+            const existing = fs.readFileSync(LOG_FILE);
+            const trimmed = existing.slice(Math.max(0, existing.length - keep));
+            fs.writeFileSync(LOG_FILE, trimmed);
+            _logSize = trimmed.length;
+            log(`[Log] Rotated — trimmed to last 2 MB`);
+        } catch (e) { /* ignore */ }
+    }
+    try { fs.appendFileSync(LOG_FILE, msg); _logSize += msgLen; } catch (e) { /* ignore */ }
 }
 
 // ── Model → Provider routing ────────────────────────────────────────────────
 
 // Returns: { target: 'cloud'|'ollama'|<provider-name>, providerConfig: {...}|null }
-function routeModel(modelName) {
+function routeModel(modelName, url = '') {
+    // Always route login and oauth to cloud
+    if (url.includes('/login') || url.includes('/oauth') || url.includes('/v1/sessions')) {
+        return { target: 'cloud', providerConfig: null };
+    }
+
     if (!modelName) return { target: CONFIG.defaultProvider || 'ollama', providerConfig: null };
     if (modelName.startsWith('claude-')) return { target: 'cloud', providerConfig: null };
 
@@ -389,30 +513,84 @@ function pipeOllamaStreamWithSignature(upstream, downstream) {
     });
 }
 
+// ── Sanitize history before cloud (strip fake thinking signatures) ──────────
+
+// When the user switches from an Ollama thinking-capable model back to Claude,
+// the conversation history contains thinking blocks with signatures we fabricated
+// (180 chars of [A-Za-z0-9+/]). Anthropic rejects these with 400. Also strip
+// thinking blocks missing a signature entirely.
+function sanitizeBodyForCloud(bodyBuffer) {
+    try {
+        const parsed = JSON.parse(bodyBuffer.toString());
+        if (!Array.isArray(parsed.messages)) return bodyBuffer;
+        let stripped = 0;
+        for (const msg of parsed.messages) {
+            if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+            const before = msg.content.length;
+            msg.content = msg.content.filter(block => {
+                if (block.type !== 'thinking') return true;
+                const sig = block.signature || '';
+                if (!sig) return false;
+                // Our injection fingerprint: exactly 180 chars from base64 alphabet
+                if (sig.length === 180 && /^[A-Za-z0-9+/]+$/.test(sig)) return false;
+                return true;
+            });
+            stripped += before - msg.content.length;
+        }
+        if (stripped > 0) {
+            log(`[Cloud] Stripped ${stripped} fake/empty-signature thinking block(s) from history`);
+            return Buffer.from(JSON.stringify(parsed));
+        }
+    } catch (e) { /* not JSON — pass through */ }
+    return bodyBuffer;
+}
+
 // ── Forward to Anthropic Cloud (passthrough) ────────────────────────────────
 
-function forwardToCloud(req, res, bodyBuffer) {
+async function forwardToCloud(req, res, bodyBuffer, isRetry = false) {
     const headers = { ...req.headers };
     headers['host'] = CLOUD_HOST;
     headers['user-agent'] = headers['user-agent'] || 'claude-code/2.1.100';
 
-    // Inject real OAuth token if available
+    // Inject real OAuth token if available and NOT already provided by client
     const token = getOAuthToken();
-    if (token) headers['authorization'] = `Bearer ${token}`;
+    if (token && !headers['authorization']) headers['authorization'] = `Bearer ${token}`;
 
-    if (bodyBuffer) headers['content-length'] = bodyBuffer.length;
+    if (bodyBuffer) {
+        bodyBuffer = sanitizeBodyForCloud(bodyBuffer);
+        headers['content-length'] = bodyBuffer.length;
+    }
 
     const options = {
         hostname: CLOUD_HOST, port: 443, path: req.url,
         method: req.method, headers, protocol: 'https:',
     };
 
-    const proxyReq = https.request(options, (proxyRes) => {
+    const proxyReq = https.request(options, async (proxyRes) => {
         log(`[Cloud Response] status=${proxyRes.statusCode} url=${req.url}`);
+        
+        // Handle 401 Unauthorized by attempting a token refresh
+        if (proxyRes.statusCode === 401 && !isRetry) {
+            log('[OAuth] Received 401 from cloud. Attempting refresh...');
+            const newToken = await refreshOAuthToken();
+            if (newToken) {
+                log('[OAuth] Refresh successful, retrying original request...');
+                // Retry the request exactly once with the new token
+                return forwardToCloud(req, res, bodyBuffer, true);
+            }
+        }
+
         if (proxyRes.statusCode >= 400) {
             let errBody = '';
             proxyRes.on('data', c => errBody += c);
-            proxyRes.on('end', () => log(`[Cloud Error] ${errBody.slice(0, 300)}`));
+            proxyRes.on('end', () => {
+                log(`[Cloud Error] ${errBody.slice(0, 300)}`);
+                if (!res.headersSent) {
+                    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+                    res.end(errBody);
+                }
+            });
+            return;
         }
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
@@ -423,7 +601,7 @@ function forwardToCloud(req, res, bodyBuffer) {
         if (!res.headersSent) { res.writeHead(502); res.end('Cloud unreachable'); }
     });
 
-    proxyReq.setTimeout(120000, () => { proxyReq.destroy(); });
+    proxyReq.setTimeout(300000, () => { proxyReq.destroy(); });
 
     if (bodyBuffer) proxyReq.end(bodyBuffer);
     else req.pipe(proxyReq);
@@ -466,9 +644,13 @@ function forwardToOllama(req, res, bodyBuffer) {
         if (proxyRes.statusCode >= 400) {
             let errBody = '';
             proxyRes.on('data', c => errBody += c);
-            proxyRes.on('end', () => log(`[Ollama Error] ${errBody.slice(0, 300)}`));
-            res.writeHead(proxyRes.statusCode, proxyRes.headers);
-            proxyRes.pipe(res);
+            proxyRes.on('end', () => {
+                log(`[Ollama Error] ${errBody.slice(0, 300)}`);
+                if (!res.headersSent) {
+                    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+                    res.end(errBody);
+                }
+            });
             return;
         }
 
@@ -597,7 +779,7 @@ function forwardToOpenAIProvider(providerName, providerConfig, req, res, bodyBuf
                     res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(out) });
                     res.end(out);
                 } catch (e) {
-                    log(`[${providerName} Parse Error] ${e.message}`);
+                    log(`[${providerName} Parse/Convert Error] ${e.message}`);
                     res.writeHead(502);
                     res.end(`Failed to parse ${providerName} response`);
                 }
@@ -727,7 +909,7 @@ const server = http.createServer(async (req, res) => {
                 modelName = parsed.model || null;
             } catch (e) { /* non-JSON — route by default */ }
 
-            const { target, providerConfig } = routeModel(modelName);
+            const { target, providerConfig } = routeModel(modelName, req.url);
             log(`POST ${req.url} | model: ${modelName || 'unknown'} | target: ${target}`);
 
             if (target === 'cloud') return forwardToCloud(req, res, bodyBuffer);
