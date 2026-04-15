@@ -38,7 +38,13 @@ if (-not (Test-Path $startScript)) {
 }
 Write-Host "[OK] Proxy directory: $proxyDir" -ForegroundColor Green
 
-# 3. Warn if port 11436 is already in use
+# 3. proxy.js must exist
+if (-not (Test-Path "$proxyDir\proxy.js")) {
+    Write-Error "proxy.js not found at:`n  $proxyDir\proxy.js`nMake sure the repo is cloned to $proxyDir"
+    exit 1
+}
+
+# 4. Warn if port 11436 is already in use
 $portBusy = Get-NetTCPConnection -LocalPort 11436 -ErrorAction SilentlyContinue
 if ($portBusy) {
     Write-Warning "Port 11436 is already in use (PID $($portBusy.OwningProcess)). A proxy instance may already be running."
@@ -96,15 +102,20 @@ Write-Host "[2/3] Task '$taskPath$taskName' registered in Task Scheduler" -Foreg
 # ── 3. Start proxy immediately (don't wait for next logon) ──────────────────
 
 Start-ScheduledTask -TaskName $taskName -TaskPath $taskPath
-Start-Sleep -Seconds 2   # give node.exe a moment to start
 
-$running = Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-    Where-Object { $_.CommandLine -like "*proxy.js*" }
+$running = $null
+$timeout = [datetime]::Now.AddSeconds(10)
+while ([datetime]::Now -lt $timeout) {
+    $running = Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+        Where-Object { $_.CommandLine -like "*proxy.js*" }
+    if ($running) { break }
+    Start-Sleep -Milliseconds 500
+}
 
 if ($running) {
     Write-Host "[3/3] Proxy started (PID $($running.ProcessId))" -ForegroundColor Green
 } else {
-    Write-Warning "[3/3] Proxy may not have started. Check: $proxyDir\proxy_err.log"
+    Write-Warning "[3/3] Proxy may not have started within 10 seconds. Check: $proxyDir\proxy_err.log"
 }
 
 # ── Done ─────────────────────────────────────────────────────────────────────
@@ -117,6 +128,7 @@ Write-Host "  1. Restart your terminal (so ANTHROPIC_BASE_URL takes effect)"
 Write-Host "  2. Run: claude"
 Write-Host "     (On first launch, a browser window will open for OAuth login — complete it once)"
 Write-Host ""
-Write-Host "Logs: $proxyDir\proxy_internal.log"
+Write-Host "Logs: $proxyDir\proxy_internal.log (proxy activity)"
+Write-Host "      $proxyDir\proxy_err.log (startup errors)"
 Write-Host "To uninstall: .\uninstall-windows.ps1 (as Administrator)"
 Write-Host ""
