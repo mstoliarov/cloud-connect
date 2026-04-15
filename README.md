@@ -275,7 +275,9 @@ sudo systemctl restart cloud-connect
 ├── uninstall-windows.ps1   # Windows: деинсталлятор
 ├── start-proxy-background.ps1  # Windows: скрытый запуск (вызывается планировщиком)
 ├── start-proxy.bat         # Windows: запуск в консоли (ручная отладка)
-├── proxy_internal.log      # Логи
+├── proxy_internal.log      # Логи активности прокси (роутинг, OAuth, ошибки)
+├── proxy.log               # stdout node при запуске (runtime, не в git)
+├── proxy_err.log           # stderr node при запуске (runtime, не в git)
 └── README.md
 ```
 
