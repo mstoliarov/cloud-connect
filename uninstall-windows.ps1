@@ -19,12 +19,18 @@ Write-Host ""
 
 # ── 1. Stop proxy process ────────────────────────────────────────────────────
 
-$running = Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-    Where-Object { $_.CommandLine -like "*proxy.js*" }
+$running = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+    Where-Object { $_.CommandLine -like "*proxy.js*" })
 
-if ($running) {
-    Stop-Process -Id $running.ProcessId -Force
-    Write-Host "[1/3] Proxy process stopped (PID $($running.ProcessId))" -ForegroundColor Green
+if ($running.Count -gt 0) {
+    foreach ($proc in $running) {
+        try {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+            Write-Host "[1/3] Proxy process stopped (PID $($proc.ProcessId))" -ForegroundColor Green
+        } catch {
+            Write-Host "[1/3] Could not stop PID $($proc.ProcessId): $_" -ForegroundColor Yellow
+        }
+    }
 } else {
     Write-Host "[1/3] Proxy was not running" -ForegroundColor Yellow
 }
