@@ -551,6 +551,9 @@ async function forwardToCloud(req, res, bodyBuffer, isRetry = false) {
     const headers = { ...req.headers };
     headers['host'] = CLOUD_HOST;
     headers['user-agent'] = headers['user-agent'] || 'claude-code/2.1.100';
+    // Remove accept-encoding: proxy doesn't decompress, so ask for plain responses
+    // to avoid ZlibError when piping or collecting error bodies
+    delete headers['accept-encoding'];
 
     // Inject real OAuth token if available and NOT already provided by client
     const token = getOAuthToken();
@@ -581,12 +584,16 @@ async function forwardToCloud(req, res, bodyBuffer, isRetry = false) {
         }
 
         if (proxyRes.statusCode >= 400) {
-            let errBody = '';
-            proxyRes.on('data', c => errBody += c);
+            const chunks = [];
+            proxyRes.on('data', c => chunks.push(c));
             proxyRes.on('end', () => {
-                log(`[Cloud Error] ${errBody.slice(0, 300)}`);
+                const errBody = Buffer.concat(chunks);
+                log(`[Cloud Error] ${errBody.toString('utf8').slice(0, 300)}`);
                 if (!res.headersSent) {
-                    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+                    const respHeaders = { ...proxyRes.headers };
+                    delete respHeaders['content-encoding'];
+                    respHeaders['content-length'] = errBody.length;
+                    res.writeHead(proxyRes.statusCode, respHeaders);
                     res.end(errBody);
                 }
             });
