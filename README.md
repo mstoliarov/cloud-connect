@@ -75,50 +75,61 @@ export ANTHROPIC_AUTH_TOKEN=ollama
 
 ## Установка на Windows
 
+### Требования
+
+- Node.js LTS — [nodejs.org](https://nodejs.org) (`node --version` должен работать в PowerShell)
+- Ollama — установлен нативно, запущен на порту 11434
+- Claude CLI: `npm install -g @anthropic-ai/claude-code`
+- Git
+
 ### 1. Клонировать репозиторий
 
 ```powershell
 git clone https://github.com/mstoliarov/cloud-connect.git "$env:USERPROFILE\.claude-provider-proxy"
+cd "$env:USERPROFILE\.claude-provider-proxy"
 ```
 
 ### 2. Настроить API ключи (опционально)
 
 ```powershell
-Copy-Item "$env:USERPROFILE\.claude-provider-proxy\proxy.env.example" "$env:USERPROFILE\.claude-provider-proxy\proxy.env"
-# Отредактировать proxy.env — добавить нужные ключи
+Copy-Item proxy.env.example proxy.env
+notepad proxy.env   # добавить HF_TOKEN, OPENROUTER_API_KEY и т.д.
 ```
 
-### 3. Настроить переменные окружения (один раз)
+### 3. Разрешить выполнение скриптов (один раз)
+
+Открыть PowerShell **от имени администратора**:
 
 ```powershell
-[System.Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "http://localhost:11436", "User")
-[System.Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "ollama", "User")
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine
 ```
 
-### 4. Автозапуск через Task Scheduler
+### 4. Установить
 
 ```powershell
-$action = New-ScheduledTaskAction `
-    -Execute "node" `
-    -Argument "`"$env:USERPROFILE\.claude-provider-proxy\proxy.js`"" `
-    -WorkingDirectory "$env:USERPROFILE\.claude-provider-proxy"
+cd "$env:USERPROFILE\.claude-provider-proxy"
+.\install-windows.ps1
+```
 
-$trigger = New-ScheduledTaskTrigger -AtLogon
+Скрипт:
+- пропишет `ANTHROPIC_BASE_URL=http://localhost:11436` для вашего пользователя
+- зарегистрирует задачу `\CloudConnect\CloudConnectProxy` в Планировщике задач (автозапуск при логоне, без окна)
+- запустит прокси немедленно
 
-$settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit 0 `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1)
+### 5. Перезапустить терминал и войти
 
-Register-ScheduledTask `
-    -TaskName "ClaudeProviderProxy" `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -RunLevel Highest `
-    -Force
+```powershell
+# Проверить, что env var подхватилась
+echo $env:ANTHROPIC_BASE_URL   # ожидается: http://localhost:11436
 
-Start-ScheduledTask -TaskName "ClaudeProviderProxy"
+# Первый запуск — браузер откроется для OAuth; пройти один раз
+claude
+```
+
+### Деинсталляция
+
+```powershell
+.\uninstall-windows.ps1   # от имени администратора
 ```
 
 ---
@@ -225,9 +236,18 @@ journalctl -u cloud-connect -f
 ### Windows
 
 ```powershell
-Stop-ScheduledTask -TaskName "ClaudeProviderProxy"
-Start-ScheduledTask -TaskName "ClaudeProviderProxy"
+# Статус прокси
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like "*proxy.js*" }
+
+# Перезапустить
+Stop-ScheduledTask  -TaskName "CloudConnectProxy" -TaskPath "\CloudConnect\"
+Start-ScheduledTask -TaskName "CloudConnectProxy" -TaskPath "\CloudConnect\"
+
+# Логи активности (routing, OAuth, ошибки API)
 Get-Content "$env:USERPROFILE\.claude-provider-proxy\proxy_internal.log" -Tail 20 -Wait
+
+# Логи запуска (если прокси не стартует)
+Get-Content "$env:USERPROFILE\.claude-provider-proxy\proxy_err.log" -Tail 20 -Wait
 ```
 
 ---
@@ -251,9 +271,13 @@ sudo systemctl restart cloud-connect
 ├── proxy.env               # API ключи (локальный, не в git)
 ├── proxy.env.example       # Шаблон для proxy.env
 ├── cloud-connect.service   # systemd unit (Linux)
-├── start-proxy.bat         # Windows: запуск в консоли
-├── start-proxy-background.ps1  # Windows: фоновый запуск
-├── proxy_internal.log      # Логи
+├── install-windows.ps1     # Windows: установщик (Task Scheduler + env var)
+├── uninstall-windows.ps1   # Windows: деинсталлятор
+├── start-proxy-background.ps1  # Windows: скрытый запуск (вызывается планировщиком)
+├── start-proxy.bat         # Windows: запуск в консоли (ручная отладка)
+├── proxy_internal.log      # Логи активности прокси (роутинг, OAuth, ошибки)
+├── proxy.log               # stdout node при запуске (runtime, не в git)
+├── proxy_err.log           # stderr node при запуске (runtime, не в git)
 └── README.md
 ```
 
