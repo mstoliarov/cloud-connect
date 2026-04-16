@@ -15,7 +15,7 @@ info "==================================="
 echo ""
 
 # ── 1. Stop and disable service ───────────────────────────────────────────────
-info "[1/4] Stopping and disabling service..."
+info "[1/3] Stopping and disabling service..."
 
 if systemctl --user is-active cloud-connect &>/dev/null; then
     systemctl --user stop cloud-connect
@@ -43,13 +43,14 @@ fi
 echo ""
 
 # ── 3. Remove ANTHROPIC_BASE_URL from shell configs ───────────────────────────
-info "[2/4] Removing ANTHROPIC_BASE_URL from shell configuration..."
+info "[2/3] Removing ANTHROPIC_BASE_URL from shell configuration..."
 
 remove_from_shell() {
     local file="$1"
     if [ -f "$file" ] && grep -q 'ANTHROPIC_BASE_URL' "$file"; then
         sed -i '/# cloud-connect proxy/d' "$file"
         sed -i '/ANTHROPIC_BASE_URL/d' "$file"
+        sed -i '/^$/{ N; /^\n$/d; }' "$file"
         ok "Removed from $file"
     fi
 }
@@ -60,10 +61,10 @@ remove_from_shell "$HOME/.zshrc"
 echo ""
 
 # ── 4. Optionally remove proxy directory ─────────────────────────────────────
-info "[3/4] Proxy directory: $PROXY_DIR"
+info "[3/3] Proxy directory: $PROXY_DIR"
 echo ""
 printf "Remove %s? This will delete proxy.env and logs. [y/N] " "$PROXY_DIR"
-read -r answer
+read -r answer || answer="N"
 if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
     rm -rf "$PROXY_DIR"
     ok "Removed $PROXY_DIR"
