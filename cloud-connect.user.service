@@ -1,0 +1,15 @@
+[Unit]
+Description=Cloud-Connect Proxy for Claude CLI
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node %h/.claude-provider-proxy/proxy.js
+WorkingDirectory=%h/.claude-provider-proxy
+Restart=on-failure
+RestartSec=3
+Environment=HOME=%h
+EnvironmentFile=-%h/.claude-provider-proxy/proxy.env
+
+[Install]
+WantedBy=default.target
