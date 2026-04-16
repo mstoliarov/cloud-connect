@@ -15,11 +15,13 @@ if ($running) {
     exit 0
 }
 
-# WindowStyle Hidden creates an invisible window — no console flickers at logon.
+# -NoNewWindow prevents a console window from appearing at logon.
+# -WindowStyle Hidden alone is not reliable for console apps on Windows.
 # stdout and stderr must go to SEPARATE files; same file causes a sharing violation.
 Start-Process -FilePath "node.exe" `
     -ArgumentList "`"$proxyScript`"" `
     -WorkingDirectory $proxyDir `
     -RedirectStandardOutput $logFile `
     -RedirectStandardError $errFile `
-    -WindowStyle Hidden
+    -WindowStyle Hidden `
+    -NoNewWindow
