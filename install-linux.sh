@@ -40,6 +40,12 @@ if ! systemctl --user status &>/dev/null; then
 fi
 ok "systemd user session"
 
+SKIP_VERIFY=0
+if ! command -v curl &>/dev/null; then
+    warn "curl not found — proxy startup verification will be skipped."
+    SKIP_VERIFY=1
+fi
+
 if ss -tnlp 2>/dev/null | grep -q ':11436'; then
     warn "Port 11436 is already in use. A proxy instance may already be running."
 fi
@@ -51,7 +57,7 @@ info "[1/5] Setting up repository..."
 
 if [ -d "$PROXY_DIR/.git" ]; then
     info "Repository already exists — pulling latest changes..."
-    git -C "$PROXY_DIR" pull origin master
+    git -C "$PROXY_DIR" pull --ff-only
     ok "Repository updated"
 elif [ -d "$PROXY_DIR" ]; then
     fail "$PROXY_DIR exists but is not a git repository. Remove it manually and re-run."
@@ -80,11 +86,16 @@ info "[3/5] Installing systemd user service..."
 
 mkdir -p "$UNIT_DIR"
 NODE_BIN=$(command -v node)
-sed "s|/usr/bin/node|$NODE_BIN|" "$PROXY_DIR/cloud-connect.user.service" > "$UNIT_FILE"
+NODE_BIN_ESC=$(printf '%s' "$NODE_BIN" | sed 's/[&|\\]/\\&/g')
+sed "s|/usr/bin/node|$NODE_BIN_ESC|" "$PROXY_DIR/cloud-connect.user.service" > "$UNIT_FILE"
 systemctl --user daemon-reload
 systemctl --user enable cloud-connect
-systemctl --user start cloud-connect
-ok "Service installed, enabled, and started (node: $NODE_BIN)"
+if systemctl --user start cloud-connect; then
+    ok "Service installed, enabled, and started (node: $NODE_BIN)"
+else
+    warn "Service failed to start. Check: journalctl --user -u cloud-connect -n 20"
+    warn "Common cause: node not found at $NODE_BIN, or proxy.env misconfigured."
+fi
 
 echo ""
 
@@ -123,23 +134,27 @@ add_to_shell "$HOME/.zshrc"
 echo ""
 
 # ── 7. Verify ─────────────────────────────────────────────────────────────────
-info "Verifying proxy is running..."
+if [ "$SKIP_VERIFY" -eq 0 ]; then
+    info "Verifying proxy is running..."
 
-TRIES=0
-until curl -s "$PROXY_URL/v1/models" > /dev/null 2>&1; do
-    TRIES=$((TRIES+1))
-    if [ $TRIES -gt 10 ]; then
-        warn "Proxy did not respond within 10 seconds."
-        warn "Check logs: journalctl --user -u cloud-connect -n 20"
-        warn "Or: cat $PROXY_DIR/proxy_internal.log"
-        break
+    PROXY_UP=0
+    TRIES=0
+    until curl -s "$PROXY_URL/v1/models" > /dev/null 2>&1; do
+        TRIES=$((TRIES+1))
+        if [ $TRIES -gt 10 ]; then
+            warn "Proxy did not respond within 10 seconds."
+            warn "Check logs: journalctl --user -u cloud-connect -n 20"
+            warn "Or: cat $PROXY_DIR/proxy_internal.log"
+            break
+        fi
+        sleep 1
+    done
+    [ $TRIES -le 10 ] && PROXY_UP=1
+
+    if [ $PROXY_UP -eq 1 ]; then
+        PROXY_PID=$(systemctl --user show cloud-connect --property=MainPID --value 2>/dev/null || echo "?")
+        ok "Proxy is running (PID $PROXY_PID)"
     fi
-    sleep 1
-done
-
-if curl -s "$PROXY_URL/v1/models" > /dev/null 2>&1; then
-    PROXY_PID=$(systemctl --user show cloud-connect --property=MainPID --value 2>/dev/null || echo "?")
-    ok "Proxy is running (PID $PROXY_PID)"
 fi
 
 echo ""
