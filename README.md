@@ -29,47 +29,35 @@ cloud-connect proxy (port 11436)
 
 ---
 
-## Установка на Linux (systemd)
-
-### 1. Клонировать репозиторий
+## Установка на Linux
 
 ```bash
 git clone https://github.com/mstoliarov/cloud-connect.git ~/.claude-provider-proxy
-cd ~/.claude-provider-proxy
+bash ~/.claude-provider-proxy/install-linux.sh
 ```
 
-### 2. Настроить API ключи (опционально)
+Скрипт:
+- Клонирует репозиторий в `~/.claude-provider-proxy` (или обновляет если уже есть)
+- Создаёт `proxy.env` из шаблона (не перезаписывает существующий)
+- Устанавливает systemd user unit — без sudo
+- Включает `loginctl linger` — прокси стартует при загрузке без активной сессии
+- Добавляет `ANTHROPIC_BASE_URL=http://localhost:11436` в `~/.bashrc` / `~/.zshrc`
+
+После установки перезапустить терминал и запустить `claude`.
+
+### Деинсталляция
 
 ```bash
-cp proxy.env.example proxy.env
-chmod 600 proxy.env
-# Отредактировать proxy.env и добавить ключи тех провайдеров, которые нужны:
-#   HF_TOKEN=...
-#   OPENROUTER_API_KEY=...
-#   GROQ_API_KEY=...
+bash ~/.claude-provider-proxy/uninstall-linux.sh
 ```
 
-### 3. Установить systemd сервис
+### Ручное управление
 
 ```bash
-sudo cp cloud-connect.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now cloud-connect
-sudo systemctl status cloud-connect
+systemctl --user status cloud-connect
+systemctl --user restart cloud-connect
+journalctl --user -u cloud-connect -f
 ```
-
-Логи: `journalctl -u cloud-connect -f` или `~/.claude-provider-proxy/proxy_internal.log`
-
-### 4. Настроить окружение
-
-Добавить в `~/.bashrc`:
-
-```bash
-export ANTHROPIC_BASE_URL=http://localhost:11436
-export ANTHROPIC_AUTH_TOKEN=ollama
-```
-
-`source ~/.bashrc` и запускать `claude`.
 
 ---
 
