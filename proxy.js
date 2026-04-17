@@ -233,6 +233,60 @@ async function fetchHuggingFaceUsage() {
     }
 }
 
+function normalizeOllamaCloudPlan(api) {
+    if (!api || !api.Plan) return null;
+    const periodEnd = api.SubscriptionPeriodEnd;
+    const resetsAt = (periodEnd && periodEnd.Valid && periodEnd.Time)
+        ? Math.floor(new Date(periodEnd.Time).getTime() / 1000)
+        : null;
+    return {
+        plan: api.Plan,
+        short: null,
+        long: {
+            label: 'weekly',
+            used: 0,   // unknown until 429 — updated on limit hit
+            limit: null,
+            pct: 0,
+            resets_at: resetsAt,
+        },
+    };
+}
+
+async function fetchOllamaCloudPlan() {
+    const apiKey = process.env.OLLAMA_API_KEY;
+    if (!apiKey) return null;
+    try {
+        // fetchJson doesn't support POST bodies — use https.request directly
+        const data = await new Promise((resolve, reject) => {
+            const body = '{}';
+            const req = https.request({
+                hostname: 'ollama.com', port: 443,
+                path: '/api/me', method: 'POST',
+                protocol: 'https:',
+                headers: {
+                    'authorization': `Bearer ${apiKey}`,
+                    'content-type': 'application/json',
+                    'content-length': Buffer.byteLength(body),
+                },
+            }, (res) => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => {
+                    try { resolve(JSON.parse(data)); }
+                    catch (e) { reject(e); }
+                });
+            });
+            req.on('error', reject);
+            req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
+            req.end(body);
+        });
+        return normalizeOllamaCloudPlan(data);
+    } catch (e) {
+        log(`[OllamaCloud Plan] fetch failed: ${e.message}`);
+        return null;
+    }
+}
+
 function extractContextWindow(entry) {
     if (!entry) return null;
     // OpenAI /v1/models format (OpenRouter, Groq, HF)
@@ -323,10 +377,16 @@ async function refreshUsageForProvider(providerId) {
     let usage = null;
     if (providerId === 'openrouter') usage = await fetchOpenRouterUsage();
     else if (providerId === 'huggingface') usage = await fetchHuggingFaceUsage();
+    else if (providerId === 'ollama-cloud') usage = await fetchOllamaCloudPlan();
 
     if (usage) {
         usageFetchCache.set(providerId, { at: now, value: usage });
-        setProviderState(providerId, { usageShort: usage.short, usageLong: usage.long, stale: false });
+        setProviderState(providerId, {
+            usageShort: usage.short,
+            usageLong: usage.long,
+            ...(usage.plan ? { plan: usage.plan } : {}),
+            stale: false,
+        });
     } else {
         const existing = getProviderState(providerId);
         if (existing) setProviderState(providerId, { stale: true });
@@ -876,6 +936,16 @@ function forwardToOpenAIProvider(providerName, providerConfig, req, res, bodyBuf
             upstreamRes.on('data', c => errBody += c);
             upstreamRes.on('end', () => {
                 log(`[${providerName} Error] ${upstreamRes.statusCode} ${errBody.slice(0, 300)}`);
+                // Detect Ollama Cloud weekly limit from 429 body
+                if (providerName === 'ollama-cloud' && upstreamRes.statusCode === 429) {
+                    if (errBody.includes('weekly usage limit')) {
+                        setProviderState('ollama-cloud', {
+                            usageLong: { label: 'weekly', used: null, limit: null, pct: 100, resets_at: null },
+                            stale: true,
+                        });
+                        log('[OllamaCloud] weekly usage limit reached');
+                    }
+                }
                 if (!res.headersSent) {
                     res.writeHead(upstreamRes.statusCode, { 'content-type': 'application/json' });
                     res.end(JSON.stringify({
@@ -1013,7 +1083,7 @@ const server = http.createServer(async (req, res) => {
         try {
             const providerId = getLastProvider() || 'ollama';
             // Cold-path refresh (non-blocking)
-            if (['openrouter', 'huggingface'].includes(providerId)) {
+            if (['openrouter', 'huggingface', 'ollama-cloud'].includes(providerId)) {
                 refreshUsageForProvider(providerId).catch(e => log(`[Status Refresh] ${e.message}`));
             }
             const meta = PROVIDER_META[providerId] || PROVIDER_META.ollama;
@@ -1130,5 +1200,6 @@ module.exports = {
     extractGroqUsage,
     normalizeOpenRouterAuthKey, fetchOpenRouterUsage, refreshUsageForProvider,
     normalizeHfWhoami, fetchHuggingFaceUsage,
+    normalizeOllamaCloudPlan, fetchOllamaCloudPlan,
     extractContextWindow, fetchContextWindow,
 };
