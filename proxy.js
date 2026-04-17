@@ -1079,6 +1079,11 @@ const server = http.createServer(async (req, res) => {
             const modelDisplay = modelName ? String(modelName).split('/').pop().replace(/^[a-z]+-/, '').slice(0, 30) : null;
             setProviderState(providerId, { model: modelName, modelDisplay });
 
+            // Async fetch context window — populates state for later /status calls
+            fetchContextWindow(providerId, modelName).then(cw => {
+                if (cw) setProviderState(providerId, { contextWindow: cw });
+            }).catch(e => log(`[CtxWindow] ${e.message}`));
+
             log(`POST ${req.url} | model: ${modelName || 'unknown'} | target: ${target}`);
 
             if (target === 'cloud') return forwardToCloud(req, res, bodyBuffer);
