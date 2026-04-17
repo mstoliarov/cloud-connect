@@ -125,6 +125,45 @@ function getLastProvider() {
     return lastProvider;
 }
 
+// ── Provider usage extractors ───────────────────────────────────────────────
+
+function parsePct(used, limit) {
+    if (!limit || limit <= 0) return 0;
+    return Math.round((used / limit) * 100);
+}
+
+function extractGroqUsage(headers) {
+    const limReq = parseInt(headers['x-ratelimit-limit-requests'], 10);
+    const remReq = parseInt(headers['x-ratelimit-remaining-requests'], 10);
+    const limTok = parseInt(headers['x-ratelimit-limit-tokens'], 10);
+    const remTok = parseInt(headers['x-ratelimit-remaining-tokens'], 10);
+
+    let short = null;
+    if (!isNaN(limReq) && !isNaN(remReq)) {
+        const rpmUsed = limReq - remReq;
+        const rpmPct = parsePct(rpmUsed, limReq);
+        short = { label: 'rpm', used: rpmUsed, limit: limReq, pct: rpmPct, resets_at: null };
+    }
+    if (!isNaN(limTok) && !isNaN(remTok)) {
+        const tpmUsed = limTok - remTok;
+        const tpmPct = parsePct(tpmUsed, limTok);
+        if (!short || tpmPct > short.pct) {
+            short = { label: 'tpm', used: tpmUsed, limit: limTok, pct: tpmPct, resets_at: null };
+        }
+    }
+
+    // Daily window — Groq returns these in some plans/models
+    let long = null;
+    const limDay = parseInt(headers['x-ratelimit-limit-requests-day'], 10);
+    const remDay = parseInt(headers['x-ratelimit-remaining-requests-day'], 10);
+    if (!isNaN(limDay) && !isNaN(remDay)) {
+        const used = limDay - remDay;
+        long = { label: 'rpd', used, limit: limDay, pct: parsePct(used, limDay), resets_at: null };
+    }
+
+    return { short, long };
+}
+
 // ── Logging ─────────────────────────────────────────────────────────────────
 
 function log(message) {
@@ -653,6 +692,15 @@ function forwardToOpenAIProvider(providerName, providerConfig, req, res, bodyBuf
     const proxyReq = https.request(options, (upstreamRes) => {
         log(`[${providerName} Response] status=${upstreamRes.statusCode}`);
 
+        // Extract rate-limit info for /status (Groq provides x-ratelimit-* headers)
+        if (providerName === 'groq') {
+            const usage = extractGroqUsage(upstreamRes.headers);
+            setProviderState('groq', {
+                usageShort: usage.short,
+                usageLong: usage.long,
+            });
+        }
+
         if (upstreamRes.statusCode >= 400) {
             let errBody = '';
             upstreamRes.on('data', c => errBody += c);
@@ -900,4 +948,5 @@ module.exports = {
     resolveProvider, PROVIDER_META,
     providerState, setProviderState, getProviderState,
     setLastProvider, getLastProvider,
+    extractGroqUsage,
 };
