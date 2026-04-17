@@ -59,3 +59,37 @@ test('GET /status includes usage object with short and long keys', async () => {
     assert.ok('short' in body.usage);
     assert.ok('long' in body.usage);
 });
+
+function postJson(port, url, body) {
+    return new Promise((resolve, reject) => {
+        const data = JSON.stringify(body);
+        const req = http.request({
+            hostname: '127.0.0.1', port, path: url, method: 'POST',
+            headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
+            timeout: 500,
+        }, (res) => {
+            let body = '';
+            res.on('data', c => body += c);
+            res.on('end', () => resolve({ status: res.statusCode, body }));
+        });
+        req.on('error', () => resolve({ status: 0, body: '' }));  // upstream unreachable is fine
+        req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: '' }); });
+        req.end(data);
+    });
+}
+
+test('POST with or- model updates lastProvider to openrouter', async () => {
+    await postJson(TEST_PORT, '/v1/messages', { model: 'or-nvidia/nemotron-super:free', messages: [] });
+    // upstream will fail (no API key / offline), but state should be recorded
+    await new Promise(r => setTimeout(r, 100));  // let handler run
+    const { body } = await getJson(TEST_PORT, '/status');
+    assert.strictEqual(body.provider.id, 'openrouter');
+    assert.strictEqual(body.model.id, 'or-nvidia/nemotron-super:free');
+});
+
+test('POST with groq- model updates lastProvider to groq', async () => {
+    await postJson(TEST_PORT, '/v1/messages', { model: 'groq-llama-3-70b', messages: [] });
+    await new Promise(r => setTimeout(r, 100));
+    const { body } = await getJson(TEST_PORT, '/status');
+    assert.strictEqual(body.provider.id, 'groq');
+});

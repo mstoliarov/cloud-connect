@@ -850,6 +850,13 @@ const server = http.createServer(async (req, res) => {
             } catch (e) { /* non-JSON — route by default */ }
 
             const { target, providerConfig } = routeModel(modelName);
+
+            // Record last-active provider for /status
+            const providerId = resolveProvider(modelName).id;
+            setLastProvider(providerId);
+            const modelDisplay = modelName ? String(modelName).split('/').pop().replace(/^[a-z]+-/, '').slice(0, 30) : null;
+            setProviderState(providerId, { model: modelName, modelDisplay });
+
             log(`POST ${req.url} | model: ${modelName || 'unknown'} | target: ${target}`);
 
             if (target === 'cloud') return forwardToCloud(req, res, bodyBuffer);
