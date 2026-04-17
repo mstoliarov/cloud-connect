@@ -55,7 +55,7 @@ function loadConfig() {
 }
 
 const CONFIG = loadConfig();
-const PORT = CONFIG.port || 11436;
+const PORT = parseInt(process.env.CLAUDE_PROXY_PORT || CONFIG.port || 11436, 10);
 const OLLAMA_HOST = CONFIG.ollama?.host || '127.0.0.1';
 const OLLAMA_PORT = IS_WINDOWS
     ? (CONFIG.ollama?.portWindows || 11434)
@@ -789,6 +789,37 @@ async function getMergedModels() {
 // ── HTTP Server ─────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
+
+    // GET /status — provider state for statusbar
+    if (req.url === '/status' && req.method === 'GET') {
+        try {
+            const providerId = getLastProvider() || 'ollama';
+            const meta = PROVIDER_META[providerId] || PROVIDER_META.ollama;
+            const state = getProviderState(providerId) || {};
+            const nowSec = Math.floor(Date.now() / 1000);
+            const body = JSON.stringify({
+                provider: { id: providerId, ...meta },
+                model: {
+                    id: state.model || null,
+                    display: state.modelDisplay || null,
+                    context_window: state.contextWindow || null,
+                },
+                usage: {
+                    short: state.usageShort || null,
+                    long: state.usageLong || null,
+                },
+                generated_at: state.generated_at || nowSec,
+                stale: state.stale || false,
+            });
+            res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+            res.end(body);
+        } catch (e) {
+            log(`[Status Error] ${e.message}`);
+            res.writeHead(500);
+            res.end('Internal error');
+        }
+        return;
+    }
 
     // GET /v1/models — merged list
     if (req.url === '/v1/models' && req.method === 'GET') {
