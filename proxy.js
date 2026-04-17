@@ -92,7 +92,7 @@ function resolveProvider(modelName) {
             return { id: name, ...PROVIDER_META[name] };
         }
     }
-    // Ollama — detect cloud by -cloud suffix in model name
+    // Ollama-cloud check must come after prefix matching (or-something-cloud → openrouter, not ollama-cloud)
     if (/-cloud(\b|$|:)/.test(modelName)) {
         return { id: 'ollama-cloud', ...PROVIDER_META['ollama-cloud'] };
     }
@@ -832,6 +832,4 @@ if (require.main === module) {
 }
 
 // ── Exports for testing ──────────────────────────────────────────────────────
-if (require.main !== module) {
-    module.exports = { resolveProvider, PROVIDER_META };
-}
+module.exports = { resolveProvider, PROVIDER_META };

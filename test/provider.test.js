@@ -50,3 +50,18 @@ test('PROVIDER_META exports valid entries', () => {
         assert.ok(meta.display, `${id} needs display`);
     }
 });
+
+test('resolveProvider: null → ollama fallback', () => {
+    const p = resolveProvider(null);
+    assert.strictEqual(p.id, 'ollama');
+});
+
+test('resolveProvider: undefined → ollama fallback', () => {
+    const p = resolveProvider(undefined);
+    assert.strictEqual(p.id, 'ollama');
+});
+
+test('resolveProvider: empty string → ollama fallback', () => {
+    const p = resolveProvider('');
+    assert.strictEqual(p.id, 'ollama');
+});
