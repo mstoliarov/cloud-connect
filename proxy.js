@@ -99,6 +99,32 @@ function resolveProvider(modelName) {
     return { id: 'ollama', ...PROVIDER_META.ollama };
 }
 
+// ── Provider state store (in-memory) ────────────────────────────────────────
+
+const providerState = new Map();
+let lastProvider = null;
+
+function setProviderState(providerId, partial) {
+    const existing = providerState.get(providerId) || {};
+    providerState.set(providerId, {
+        ...existing,
+        ...partial,
+        generated_at: Math.floor(Date.now() / 1000),
+    });
+}
+
+function getProviderState(providerId) {
+    return providerState.get(providerId) || null;
+}
+
+function setLastProvider(providerId) {
+    lastProvider = providerId;
+}
+
+function getLastProvider() {
+    return lastProvider;
+}
+
 // ── Logging ─────────────────────────────────────────────────────────────────
 
 function log(message) {
@@ -832,4 +858,8 @@ if (require.main === module) {
 }
 
 // ── Exports for testing ──────────────────────────────────────────────────────
-module.exports = { resolveProvider, PROVIDER_META };
+module.exports = {
+    resolveProvider, PROVIDER_META,
+    providerState, setProviderState, getProviderState,
+    setLastProvider, getLastProvider,
+};
