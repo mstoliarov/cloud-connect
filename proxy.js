@@ -245,7 +245,7 @@ function extractContextWindow(entry) {
     // Ollama /api/show format (model_info keys like 'llama.context_length', 'qwen2.context_length')
     if (entry.model_info) {
         const key = Object.keys(entry.model_info).find(k => k.endsWith('.context_length'));
-        if (key) return entry.model_info[key];
+        if (key && typeof entry.model_info[key] === 'number') return entry.model_info[key];
     }
     return null;
 }
@@ -307,7 +307,7 @@ async function fetchContextWindow(providerId, modelId) {
         log(`[CtxWindow] ${providerId}/${modelId}: ${e.message}`);
     }
 
-    if (ctx) ctxWindowCache.set(cacheKey, ctx);
+    if (ctx !== null) ctxWindowCache.set(cacheKey, ctx);
     return ctx;
 }
 
