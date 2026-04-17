@@ -199,6 +199,118 @@ async function fetchOpenRouterUsage() {
     }
 }
 
+function normalizeHfWhoami(api) {
+    const u = api?.inferenceProvidersUsage;
+    if (!u) return { short: null, long: null };
+    const used = typeof u.usageCents === 'number' ? u.usageCents : 0;
+    let limit = typeof u.limitCents === 'number' ? u.limitCents : null;
+    if (!limit) limit = api.isPro ? 200000 : 10000;  // PRO $20 / Free $0.10
+    return {
+        short: null,
+        long: {
+            label: 'credits/mo',
+            used, limit,
+            pct: parsePct(used, limit),
+            resets_at: api.periodEnd || null,
+        },
+    };
+}
+
+async function fetchHuggingFaceUsage() {
+    const apiKey = process.env.HF_TOKEN;
+    if (!apiKey) return null;
+    try {
+        const data = await fetchJson(true, {
+            hostname: 'huggingface.co', port: 443,
+            path: '/api/whoami-v2', method: 'GET',
+            protocol: 'https:',
+            headers: { 'authorization': `Bearer ${apiKey}` },
+        }, 5000);
+        return normalizeHfWhoami(data);
+    } catch (e) {
+        log(`[HF Usage] fetch failed: ${e.message}`);
+        return null;
+    }
+}
+
+function extractContextWindow(entry) {
+    if (!entry) return null;
+    // OpenAI /v1/models format (OpenRouter, Groq, HF)
+    if (typeof entry.context_length === 'number') return entry.context_length;
+    if (entry.top_provider && typeof entry.top_provider.context_length === 'number') {
+        return entry.top_provider.context_length;
+    }
+    // Ollama /api/tags format
+    if (entry.details && typeof entry.details.num_ctx === 'number') return entry.details.num_ctx;
+    // Ollama /api/show format (model_info keys like 'llama.context_length', 'qwen2.context_length')
+    if (entry.model_info) {
+        const key = Object.keys(entry.model_info).find(k => k.endsWith('.context_length'));
+        if (key) return entry.model_info[key];
+    }
+    return null;
+}
+
+// Cache: `${providerId}:${modelId}` → context_window number
+const ctxWindowCache = new Map();
+
+async function fetchContextWindow(providerId, modelId) {
+    const cacheKey = `${providerId}:${modelId}`;
+    if (ctxWindowCache.has(cacheKey)) return ctxWindowCache.get(cacheKey);
+
+    let ctx = null;
+    try {
+        if (providerId === 'openrouter') {
+            const apiKey = process.env.OPENROUTER_API_KEY;
+            if (!apiKey) return null;
+            const data = await fetchJson(true, {
+                hostname: 'openrouter.ai', port: 443,
+                path: `/api/v1/models/${encodeURIComponent(modelId.replace(/^or-/, ''))}`,
+                method: 'GET', protocol: 'https:',
+                headers: { 'authorization': `Bearer ${apiKey}` },
+            }, 5000);
+            ctx = extractContextWindow(data?.data || data);
+        } else if (providerId === 'groq') {
+            const apiKey = process.env.GROQ_API_KEY;
+            if (!apiKey) return null;
+            const data = await fetchJson(true, {
+                hostname: 'api.groq.com', port: 443,
+                path: '/openai/v1/models', method: 'GET', protocol: 'https:',
+                headers: { 'authorization': `Bearer ${apiKey}` },
+            }, 5000);
+            const model = (data?.data || []).find(m => m.id === modelId.replace(/^groq-/, ''));
+            ctx = model ? extractContextWindow(model) : null;
+        } else if (providerId === 'ollama') {
+            // fetchJson doesn't support POST bodies — use http.request directly
+            ctx = await new Promise((resolve) => {
+                const body = JSON.stringify({ name: modelId });
+                const req = http.request({
+                    hostname: '127.0.0.1', port: OLLAMA_PORT,
+                    path: '/api/show', method: 'POST',
+                    headers: {
+                        'content-type': 'application/json',
+                        'content-length': Buffer.byteLength(body),
+                    },
+                }, (res) => {
+                    let data = '';
+                    res.on('data', c => data += c);
+                    res.on('end', () => {
+                        try { resolve(extractContextWindow(JSON.parse(data))); }
+                        catch (e) { resolve(null); }
+                    });
+                });
+                req.on('error', () => resolve(null));
+                req.setTimeout(5000, () => { req.destroy(); resolve(null); });
+                req.end(body);
+            });
+        }
+    } catch (e) {
+        log(`[CtxWindow] ${providerId}/${modelId}: ${e.message}`);
+    }
+
+    if (ctx) ctxWindowCache.set(cacheKey, ctx);
+    return ctx;
+}
+
 // TTL cache for cold-path fetchers (5 min)
 const USAGE_TTL_SEC = 300;
 const usageFetchCache = new Map();
@@ -210,7 +322,7 @@ async function refreshUsageForProvider(providerId) {
 
     let usage = null;
     if (providerId === 'openrouter') usage = await fetchOpenRouterUsage();
-    // more providers added in later tasks
+    else if (providerId === 'huggingface') usage = await fetchHuggingFaceUsage();
 
     if (usage) {
         usageFetchCache.set(providerId, { at: now, value: usage });
@@ -1012,4 +1124,6 @@ module.exports = {
     setLastProvider, getLastProvider,
     extractGroqUsage,
     normalizeOpenRouterAuthKey, fetchOpenRouterUsage, refreshUsageForProvider,
+    normalizeHfWhoami, fetchHuggingFaceUsage,
+    extractContextWindow, fetchContextWindow,
 };
