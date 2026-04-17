@@ -164,6 +164,64 @@ function extractGroqUsage(headers) {
     return { short, long };
 }
 
+function normalizeOpenRouterAuthKey(apiResponse) {
+    const data = apiResponse?.data || {};
+    const credits = typeof data.limit === 'number' ? data.limit : 0;
+    const isFree = data.is_free_tier === true;
+    // Free tier: 50 rpd; with ≥10 credits: 1000 rpd
+    const rpdLimit = isFree || credits < 10 ? 50 : 1000;
+    return {
+        short: null,
+        long: {
+            label: 'req/day',
+            used: 0,
+            limit: rpdLimit,
+            pct: 0,
+            resets_at: null,
+        },
+    };
+}
+
+async function fetchOpenRouterUsage() {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) return null;
+    try {
+        const data = await fetchJson(true, {
+            hostname: 'openrouter.ai', port: 443,
+            path: '/api/v1/auth/key', method: 'GET',
+            protocol: 'https:',
+            headers: { 'authorization': `Bearer ${apiKey}` },
+        }, 5000);
+        return normalizeOpenRouterAuthKey(data);
+    } catch (e) {
+        log(`[OpenRouter Usage] fetch failed: ${e.message}`);
+        return null;
+    }
+}
+
+// TTL cache for cold-path fetchers (5 min)
+const USAGE_TTL_SEC = 300;
+const usageFetchCache = new Map();
+
+async function refreshUsageForProvider(providerId) {
+    const cached = usageFetchCache.get(providerId);
+    const now = Math.floor(Date.now() / 1000);
+    if (cached && now - cached.at < USAGE_TTL_SEC) return cached.value;
+
+    let usage = null;
+    if (providerId === 'openrouter') usage = await fetchOpenRouterUsage();
+    // more providers added in later tasks
+
+    if (usage) {
+        usageFetchCache.set(providerId, { at: now, value: usage });
+        setProviderState(providerId, { usageShort: usage.short, usageLong: usage.long, stale: false });
+    } else {
+        const existing = getProviderState(providerId);
+        if (existing) setProviderState(providerId, { stale: true });
+    }
+    return usage;
+}
+
 // ── Logging ─────────────────────────────────────────────────────────────────
 
 function log(message) {
@@ -842,6 +900,10 @@ const server = http.createServer(async (req, res) => {
     if (req.url === '/status' && req.method === 'GET') {
         try {
             const providerId = getLastProvider() || 'ollama';
+            // Cold-path refresh (non-blocking)
+            if (['openrouter', 'huggingface'].includes(providerId)) {
+                refreshUsageForProvider(providerId).catch(e => log(`[Status Refresh] ${e.message}`));
+            }
             const meta = PROVIDER_META[providerId] || PROVIDER_META.ollama;
             const state = getProviderState(providerId) || {};
             const nowSec = Math.floor(Date.now() / 1000);
@@ -949,4 +1011,5 @@ module.exports = {
     providerState, setProviderState, getProviderState,
     setLastProvider, getLastProvider,
     extractGroqUsage,
+    normalizeOpenRouterAuthKey, fetchOpenRouterUsage, refreshUsageForProvider,
 };
