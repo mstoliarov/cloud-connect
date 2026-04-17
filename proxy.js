@@ -69,6 +69,36 @@ for (const [name, prov] of Object.entries(CONFIG.providers || {})) {
     }
 }
 
+// ── Provider metadata (for /status endpoint) ────────────────────────────────
+
+const PROVIDER_META = {
+    anthropic:      { icon: '🟠', color: 'orange', display: 'ant'  },
+    ollama:         { icon: '⚪', color: 'white',  display: 'oll'  },
+    'ollama-cloud': { icon: '🔷', color: 'cyan',   display: 'ollc' },
+    openrouter:     { icon: '🔵', color: 'blue',   display: 'or'   },
+    groq:           { icon: '🔴', color: 'red',    display: 'groq' },
+    huggingface:    { icon: '🟡', color: 'yellow', display: 'hf'   },
+};
+
+function resolveProvider(modelName) {
+    if (!modelName) {
+        return { id: 'ollama', ...PROVIDER_META.ollama };
+    }
+    if (modelName.startsWith('claude-')) {
+        return { id: 'anthropic', ...PROVIDER_META.anthropic };
+    }
+    for (const { prefix, name } of PROVIDER_PREFIXES) {
+        if (modelName.startsWith(prefix)) {
+            return { id: name, ...PROVIDER_META[name] };
+        }
+    }
+    // Ollama — detect cloud by -cloud suffix in model name
+    if (/-cloud(\b|$|:)/.test(modelName)) {
+        return { id: 'ollama-cloud', ...PROVIDER_META['ollama-cloud'] };
+    }
+    return { id: 'ollama', ...PROVIDER_META.ollama };
+}
+
 // ── Logging ─────────────────────────────────────────────────────────────────
 
 function log(message) {
@@ -789,12 +819,19 @@ server.on('error', (err) => {
     log(`[Server Error] ${err.message}`);
 });
 
-server.listen(PORT, () => {
-    const providerList = Object.keys(CONFIG.providers || {}).join(', ');
-    log(`Cloud-Connect Proxy v1.0 started on port ${PORT}`);
-    log(`Ollama: ${OLLAMA_HOST}:${OLLAMA_PORT}`);
-    log(`Providers: ${providerList || 'none'}`);
-    log(`Default: ${CONFIG.defaultProvider || 'ollama'}`);
-    console.log(`Cloud-Connect Proxy listening on port ${PORT}`);
-    console.log(`Providers: anthropic (cloud), ollama${providerList ? ', ' + providerList : ''}`);
-});
+if (require.main === module) {
+    server.listen(PORT, () => {
+        const providerList = Object.keys(CONFIG.providers || {}).join(', ');
+        log(`Cloud-Connect Proxy v1.0 started on port ${PORT}`);
+        log(`Ollama: ${OLLAMA_HOST}:${OLLAMA_PORT}`);
+        log(`Providers: ${providerList || 'none'}`);
+        log(`Default: ${CONFIG.defaultProvider || 'ollama'}`);
+        console.log(`Cloud-Connect Proxy listening on port ${PORT}`);
+        console.log(`Providers: anthropic (cloud), ollama${providerList ? ', ' + providerList : ''}`);
+    });
+}
+
+// ── Exports for testing ──────────────────────────────────────────────────────
+if (require.main !== module) {
+    module.exports = { resolveProvider, PROVIDER_META };
+}
