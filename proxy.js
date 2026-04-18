@@ -99,6 +99,17 @@ function resolveProvider(modelName) {
     return { id: 'ollama', ...PROVIDER_META.ollama };
 }
 
+// ── LRU cache helper (insertion-order Map) ──────────────────────────────────
+
+function lruSet(map, key, val, max = 200) {
+    if (map.has(key)) map.delete(key);
+    map.set(key, val);
+    if (map.size > max) {
+        const oldest = map.keys().next().value;
+        map.delete(oldest);
+    }
+}
+
 // ── Provider state store (in-memory) ────────────────────────────────────────
 
 const providerState = new Map();
@@ -361,7 +372,7 @@ async function fetchContextWindow(providerId, modelId) {
         log(`[CtxWindow] ${providerId}/${modelId}: ${e.message}`);
     }
 
-    if (ctx !== null) ctxWindowCache.set(cacheKey, ctx);
+    if (ctx !== null) lruSet(ctxWindowCache, cacheKey, ctx);
     return ctx;
 }
 
@@ -380,7 +391,7 @@ async function refreshUsageForProvider(providerId) {
     else if (providerId === 'ollama-cloud') usage = await fetchOllamaCloudPlan();
 
     if (usage) {
-        usageFetchCache.set(providerId, { at: now, value: usage });
+        lruSet(usageFetchCache, providerId, { at: now, value: usage }, 50);
         setProviderState(providerId, {
             usageShort: usage.short,
             usageLong: usage.long,
@@ -403,18 +414,24 @@ function log(message) {
 
 // ── OAuth credentials ───────────────────────────────────────────────────────
 
+let credsCache = { mtimeMs: 0, token: null };
 function getOAuthToken() {
     try {
+        const stat = fs.statSync(CREDENTIALS_FILE);
+        if (stat.mtimeMs === credsCache.mtimeMs) return credsCache.token;
         const creds = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'));
-        return creds?.claudeAiOauth?.accessToken || null;
+        const token = creds?.claudeAiOauth?.accessToken || null;
+        credsCache = { mtimeMs: stat.mtimeMs, token };
+        return token;
     } catch (e) {
+        credsCache = { mtimeMs: 0, token: null };
         return null;
     }
 }
 
 // ── Model → Provider routing ────────────────────────────────────────────────
 
-// Returns: { target: 'cloud'|'ollama'|<provider-name>, providerConfig: {...}|null }
+// Returns: { target: 'cloud'|'ollama'|<provider-name>, providerConfig: {...}|null, unconfiguredCloud?: true }
 function routeModel(modelName) {
     if (!modelName) return { target: CONFIG.defaultProvider || 'ollama', providerConfig: null };
     if (modelName.startsWith('claude-')) return { target: 'cloud', providerConfig: null };
@@ -423,6 +440,13 @@ function routeModel(modelName) {
         if (modelName.startsWith(prefix)) {
             return { target: name, providerConfig: config };
         }
+    }
+
+    // *-cloud suffix → ollama-cloud if configured, otherwise local-ollama fallback (with flag for caller)
+    if (/-cloud(\b|$|:)/.test(modelName)) {
+        const cfg = CONFIG.providers?.['ollama-cloud'];
+        if (cfg) return { target: 'ollama-cloud', providerConfig: cfg };
+        return { target: 'ollama', providerConfig: null, unconfiguredCloud: true };
     }
 
     return { target: 'ollama', providerConfig: null };
@@ -462,7 +486,10 @@ function toOpenAI(body, providerConfig) {
     }
     if (body.temperature != null) out.temperature = body.temperature;
     if (body.top_p != null) out.top_p = body.top_p;
-    if (body.stream != null) out.stream = body.stream;
+    if (body.stream != null) {
+        out.stream = body.stream;
+        if (body.stream) out.stream_options = { include_usage: true };
+    }
     if (body.stop_sequences) out.stop = body.stop_sequences;
     // thinking / betas are intentionally omitted — providers don't support them
     return out;
@@ -590,7 +617,32 @@ function streamOpenAIToAnthropic(upstreamRes, res, originalModel, msgId) {
 
     upstreamRes.on('error', (err) => {
         log(`[Stream Error] ${err.message}`);
-        if (!res.writableEnded) res.end();
+        if (res.writableEnded) return;
+        try {
+            if (!started) {
+                emitSSE(res, 'message_start', {
+                    type: 'message_start',
+                    message: {
+                        id: msgId, type: 'message', role: 'assistant',
+                        content: [], model: originalModel,
+                        stop_reason: null, stop_sequence: null,
+                        usage: { input_tokens: 0, output_tokens: 0 },
+                    },
+                });
+                emitSSE(res, 'content_block_start', {
+                    type: 'content_block_start', index: 0,
+                    content_block: { type: 'text', text: '' },
+                });
+            }
+            emitSSE(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
+            emitSSE(res, 'message_delta', {
+                type: 'message_delta',
+                delta: { stop_reason: 'error', stop_sequence: null },
+                usage: { output_tokens: outputTokens },
+            });
+            emitSSE(res, 'message_stop', { type: 'message_stop' });
+        } catch (e) { /* connection already broken */ }
+        res.end();
     });
 }
 
@@ -638,11 +690,12 @@ function modelSupportsThinking(modelName) {
     return list.some(entry => modelName === entry || modelName.startsWith(entry));
 }
 
+const SIG_MARKER = 'PROXYFAKE';
 function generateSignature() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    let sig = '';
-    for (let i = 0; i < 180; i++) sig += chars[Math.floor(Math.random() * chars.length)];
-    return sig;
+    let sig = SIG_MARKER;
+    while (sig.length < 180) sig += chars[Math.floor(Math.random() * chars.length)];
+    return sig.slice(0, 180);
 }
 
 function injectSignatureIntoOllamaJson(bodyStr) {
@@ -732,7 +785,9 @@ function sanitizeBodyForCloud(bodyBuffer) {
                 if (block.type !== 'thinking') return true;
                 const sig = block.signature || '';
                 if (!sig) return false;
-                // Our injection fingerprint: exactly 180 chars from base64 alphabet
+                // Our injection fingerprint: explicit marker prefix (new format)
+                if (sig.startsWith(SIG_MARKER)) return false;
+                // Backwards compat: legacy injections were 180 chars of base64 alphabet without padding
                 if (sig.length === 180 && /^[A-Za-z0-9+/]+$/.test(sig)) return false;
                 return true;
             });
@@ -791,17 +846,13 @@ function forwardToCloud(req, res, bodyBuffer) {
 
 // ── Forward to Ollama (Anthropic-native with sanitization) ──────────────────
 
-function forwardToOllama(req, res, bodyBuffer) {
+function forwardToOllama(req, res, bodyBuffer, parsedBody) {
     let headers = { ...req.headers };
     headers['host'] = `${OLLAMA_HOST}:${OLLAMA_PORT}`;
     headers['authorization'] = 'Bearer ollama';
 
-    // Detect model and whether it supports thinking
-    let modelName = null;
-    try {
-        const parsed = JSON.parse((bodyBuffer || Buffer.from('{}')).toString());
-        modelName = parsed.model || null;
-    } catch (e) { /* ignore */ }
+    // Detect model from caller-provided parsedBody (avoid re-parsing the buffer)
+    const modelName = parsedBody?.model || null;
     const thinkingMode = modelSupportsThinking(modelName);
 
     let actualBody = bodyBuffer;
@@ -869,25 +920,31 @@ function forwardToOllama(req, res, bodyBuffer) {
     // Large models may take a while to load
     proxyReq.setTimeout(600000, () => { proxyReq.destroy(); });
 
-    if (actualBody) proxyReq.end(actualBody);
-    else req.pipe(proxyReq);
+    proxyReq.end(actualBody || undefined);
 }
 
 // ── Forward to OpenAI-compatible provider (HuggingFace, OpenRouter, Groq) ───
 
-function forwardToOpenAIProvider(providerName, providerConfig, req, res, bodyBuffer) {
+function forwardToOpenAIProvider(providerName, providerConfig, req, res, bodyBuffer, parsedBody) {
     const apiKey = process.env[providerConfig.apiKeyEnv] || null;
     if (!apiKey) log(`[${providerName}] Warning: ${providerConfig.apiKeyEnv} is not set`);
 
-    let parsed;
-    try { parsed = JSON.parse(bodyBuffer.toString()); }
-    catch (e) {
-        res.writeHead(400, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request', message: 'Invalid JSON body' } }));
-        return;
+    let parsed = parsedBody;
+    if (!parsed) {
+        try { parsed = JSON.parse(bodyBuffer.toString()); }
+        catch (e) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request', message: 'Invalid JSON body' } }));
+            return;
+        }
     }
 
     const originalModel = parsed.model;
+    if (!originalModel) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request', message: 'model field is required' } }));
+        return;
+    }
     // Strip provider prefix from model name to get the actual model ID
     const actualModel = originalModel.replace(new RegExp(`^${providerConfig.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), '');
     const isStream = !!parsed.stream;
@@ -1134,17 +1191,22 @@ const server = http.createServer(async (req, res) => {
         req.on('data', chunk => chunks.push(chunk));
         req.on('end', () => {
             const bodyBuffer = Buffer.concat(chunks);
+            let parsedBody = null;
             let modelName = null;
 
             try {
-                const parsed = JSON.parse(bodyBuffer.toString());
-                modelName = parsed.model || null;
+                parsedBody = JSON.parse(bodyBuffer.toString());
+                modelName = parsedBody.model || null;
             } catch (e) { /* non-JSON — route by default */ }
 
-            const { target, providerConfig } = routeModel(modelName);
+            const route = routeModel(modelName);
+            const { target, providerConfig } = route;
+            if (route.unconfiguredCloud) {
+                log(`[Warning] Model "${modelName}" matches *-cloud but ollama-cloud not configured — falling back to local Ollama`);
+            }
 
-            // Record last-active provider for /status
-            const providerId = resolveProvider(modelName).id;
+            // Record last-active provider for /status — use the actual routed target (not aspirational ollama-cloud)
+            const providerId = target === 'cloud' ? 'anthropic' : target;
             setLastProvider(providerId);
             const modelDisplay = modelName ? String(modelName).split('/').pop().replace(/^[a-z]+-/, '').slice(0, 30) : null;
             setProviderState(providerId, { model: modelName, modelDisplay });
@@ -1157,16 +1219,16 @@ const server = http.createServer(async (req, res) => {
             log(`POST ${req.url} | model: ${modelName || 'unknown'} | target: ${target}`);
 
             if (target === 'cloud') return forwardToCloud(req, res, bodyBuffer);
-            if (target === 'ollama') return forwardToOllama(req, res, bodyBuffer);
+            if (target === 'ollama') return forwardToOllama(req, res, bodyBuffer, parsedBody);
 
             // OpenAI-compatible provider
             if (providerConfig) {
-                return forwardToOpenAIProvider(target, providerConfig, req, res, bodyBuffer);
+                return forwardToOpenAIProvider(target, providerConfig, req, res, bodyBuffer, parsedBody);
             }
 
             // Fallback — shouldn't happen, but route to Ollama
             log(`[Warning] Unknown target "${target}", falling back to Ollama`);
-            forwardToOllama(req, res, bodyBuffer);
+            forwardToOllama(req, res, bodyBuffer, parsedBody);
         });
         return;
     }
@@ -1178,23 +1240,29 @@ const server = http.createServer(async (req, res) => {
 
 server.on('error', (err) => {
     log(`[Server Error] ${err.message}`);
+    if (err.code === 'EADDRINUSE') {
+        console.error(`Port ${PORT} already in use — exiting`);
+        process.exit(1);
+    }
 });
 
 if (require.main === module) {
-    server.listen(PORT, () => {
+    const LISTEN_HOST = process.env.CLAUDE_PROXY_HOST || '127.0.0.1';
+    server.listen(PORT, LISTEN_HOST, () => {
         const providerList = Object.keys(CONFIG.providers || {}).join(', ');
-        log(`Cloud-Connect Proxy v1.0 started on port ${PORT}`);
+        log(`Cloud-Connect Proxy v1.0 started on ${LISTEN_HOST}:${PORT}`);
         log(`Ollama: ${OLLAMA_HOST}:${OLLAMA_PORT}`);
         log(`Providers: ${providerList || 'none'}`);
         log(`Default: ${CONFIG.defaultProvider || 'ollama'}`);
-        console.log(`Cloud-Connect Proxy listening on port ${PORT}`);
+        console.log(`Cloud-Connect Proxy listening on ${LISTEN_HOST}:${PORT}`);
         console.log(`Providers: anthropic (cloud), ollama${providerList ? ', ' + providerList : ''}`);
     });
 }
 
 // ── Exports for testing ──────────────────────────────────────────────────────
 module.exports = {
-    resolveProvider, PROVIDER_META,
+    resolveProvider, routeModel, PROVIDER_META,
+    lruSet,
     providerState, setProviderState, getProviderState,
     setLastProvider, getLastProvider,
     extractGroqUsage,
