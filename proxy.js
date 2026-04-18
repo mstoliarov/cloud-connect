@@ -65,6 +65,7 @@ const OLLAMA_PORT = IS_WINDOWS
 const PROVIDER_PREFIXES = [];
 for (const [name, prov] of Object.entries(CONFIG.providers || {})) {
     if (prov.prefix) {
+        prov.prefixRegex = new RegExp(`^${prov.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
         PROVIDER_PREFIXES.push({ prefix: prov.prefix, name, config: prov });
     }
 }
@@ -80,23 +81,25 @@ const PROVIDER_META = {
     huggingface:    { icon: '🟡', color: 'yellow', display: 'hf'   },
 };
 
-function resolveProvider(modelName) {
-    if (!modelName) {
-        return { id: 'ollama', ...PROVIDER_META.ollama };
+// Shared prefix-matching core used by resolveProvider and routeModel.
+// Prefix-check must come before -cloud regex (or-something-cloud → openrouter, not ollama-cloud).
+function classifyModel(modelName) {
+    if (!modelName) return { name: CONFIG.defaultProvider || 'ollama', config: null };
+    if (modelName.startsWith('claude-')) return { name: 'anthropic', config: null };
+    for (const { prefix, name, config } of PROVIDER_PREFIXES) {
+        if (modelName.startsWith(prefix)) return { name, config };
     }
-    if (modelName.startsWith('claude-')) {
-        return { id: 'anthropic', ...PROVIDER_META.anthropic };
-    }
-    for (const { prefix, name } of PROVIDER_PREFIXES) {
-        if (modelName.startsWith(prefix)) {
-            return { id: name, ...PROVIDER_META[name] };
-        }
-    }
-    // Ollama-cloud check must come after prefix matching (or-something-cloud → openrouter, not ollama-cloud)
     if (/-cloud(\b|$|:)/.test(modelName)) {
-        return { id: 'ollama-cloud', ...PROVIDER_META['ollama-cloud'] };
+        const cfg = CONFIG.providers?.['ollama-cloud'];
+        return { name: 'ollama-cloud', config: cfg || null };
     }
-    return { id: 'ollama', ...PROVIDER_META.ollama };
+    return { name: 'ollama', config: null };
+}
+
+function resolveProvider(modelName) {
+    if (!modelName) return { id: 'ollama', ...PROVIDER_META.ollama };
+    const { name } = classifyModel(modelName);
+    return { id: name, ...(PROVIDER_META[name] || PROVIDER_META.ollama) };
 }
 
 // ── LRU cache helper (insertion-order Map) ──────────────────────────────────
@@ -267,30 +270,17 @@ async function fetchOllamaCloudPlan() {
     const apiKey = process.env.OLLAMA_API_KEY;
     if (!apiKey) return null;
     try {
-        // fetchJson doesn't support POST bodies — use https.request directly
-        const data = await new Promise((resolve, reject) => {
-            const body = '{}';
-            const req = https.request({
-                hostname: 'ollama.com', port: 443,
-                path: '/api/me', method: 'POST',
-                protocol: 'https:',
-                headers: {
-                    'authorization': `Bearer ${apiKey}`,
-                    'content-type': 'application/json',
-                    'content-length': Buffer.byteLength(body),
-                },
-            }, (res) => {
-                let data = '';
-                res.on('data', c => data += c);
-                res.on('end', () => {
-                    try { resolve(JSON.parse(data)); }
-                    catch (e) { reject(e); }
-                });
-            });
-            req.on('error', reject);
-            req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
-            req.end(body);
-        });
+        const body = '{}';
+        const data = await fetchJson(true, {
+            hostname: 'ollama.com', port: 443,
+            path: '/api/me', method: 'POST',
+            protocol: 'https:',
+            headers: {
+                'authorization': `Bearer ${apiKey}`,
+                'content-type': 'application/json',
+                'content-length': Buffer.byteLength(body),
+            },
+        }, 5000, body);
         return normalizeOllamaCloudPlan(data);
     } catch (e) {
         log(`[OllamaCloud Plan] fetch failed: ${e.message}`);
@@ -345,28 +335,17 @@ async function fetchContextWindow(providerId, modelId) {
             const model = (data?.data || []).find(m => m.id === modelId.replace(/^groq-/, ''));
             ctx = model ? extractContextWindow(model) : null;
         } else if (providerId === 'ollama') {
-            // fetchJson doesn't support POST bodies — use http.request directly
-            ctx = await new Promise((resolve) => {
-                const body = JSON.stringify({ name: modelId });
-                const req = http.request({
-                    hostname: '127.0.0.1', port: OLLAMA_PORT,
-                    path: '/api/show', method: 'POST',
-                    headers: {
-                        'content-type': 'application/json',
-                        'content-length': Buffer.byteLength(body),
-                    },
-                }, (res) => {
-                    let data = '';
-                    res.on('data', c => data += c);
-                    res.on('end', () => {
-                        try { resolve(extractContextWindow(JSON.parse(data))); }
-                        catch (e) { resolve(null); }
-                    });
-                });
-                req.on('error', () => resolve(null));
-                req.setTimeout(5000, () => { req.destroy(); resolve(null); });
-                req.end(body);
-            });
+            const body = JSON.stringify({ name: modelId });
+            ctx = await fetchJson(false, {
+                hostname: '127.0.0.1', port: OLLAMA_PORT,
+                path: '/api/show', method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    'content-length': Buffer.byteLength(body),
+                },
+            }, 5000, body)
+                .then(data => extractContextWindow(data))
+                .catch(() => null);
         }
     } catch (e) {
         log(`[CtxWindow] ${providerId}/${modelId}: ${e.message}`);
@@ -433,23 +412,11 @@ function getOAuthToken() {
 
 // Returns: { target: 'cloud'|'ollama'|<provider-name>, providerConfig: {...}|null, unconfiguredCloud?: true }
 function routeModel(modelName) {
-    if (!modelName) return { target: CONFIG.defaultProvider || 'ollama', providerConfig: null };
-    if (modelName.startsWith('claude-')) return { target: 'cloud', providerConfig: null };
-
-    for (const { prefix, name, config } of PROVIDER_PREFIXES) {
-        if (modelName.startsWith(prefix)) {
-            return { target: name, providerConfig: config };
-        }
-    }
-
-    // *-cloud suffix → ollama-cloud if configured, otherwise local-ollama fallback (with flag for caller)
-    if (/-cloud(\b|$|:)/.test(modelName)) {
-        const cfg = CONFIG.providers?.['ollama-cloud'];
-        if (cfg) return { target: 'ollama-cloud', providerConfig: cfg };
-        return { target: 'ollama', providerConfig: null, unconfiguredCloud: true };
-    }
-
-    return { target: 'ollama', providerConfig: null };
+    const { name, config } = classifyModel(modelName);
+    if (name === 'anthropic') return { target: 'cloud', providerConfig: null };
+    // *-cloud without configured provider → fall back to local Ollama
+    if (name === 'ollama-cloud' && !config) return { target: 'ollama', providerConfig: null, unconfiguredCloud: true };
+    return { target: name, providerConfig: config };
 }
 
 // ── Anthropic ↔ OpenAI format conversion ────────────────────────────────────
@@ -891,7 +858,6 @@ function forwardToOllama(req, res, bodyBuffer, parsedBody) {
                 res.writeHead(proxyRes.statusCode, proxyRes.headers);
                 pipeOllamaStreamWithSignature(proxyRes, res);
             } else {
-                // Buffer, inject signature, send
                 let body = '';
                 proxyRes.on('data', c => body += c);
                 proxyRes.on('end', () => {
@@ -925,31 +891,20 @@ function forwardToOllama(req, res, bodyBuffer, parsedBody) {
 
 // ── Forward to OpenAI-compatible provider (HuggingFace, OpenRouter, Groq) ───
 
-function forwardToOpenAIProvider(providerName, providerConfig, req, res, bodyBuffer, parsedBody) {
+function forwardToOpenAIProvider(providerName, providerConfig, req, res, parsedBody) {
     const apiKey = process.env[providerConfig.apiKeyEnv] || null;
     if (!apiKey) log(`[${providerName}] Warning: ${providerConfig.apiKeyEnv} is not set`);
 
-    let parsed = parsedBody;
-    if (!parsed) {
-        try { parsed = JSON.parse(bodyBuffer.toString()); }
-        catch (e) {
-            res.writeHead(400, { 'content-type': 'application/json' });
-            res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request', message: 'Invalid JSON body' } }));
-            return;
-        }
-    }
-
-    const originalModel = parsed.model;
+    const originalModel = parsedBody.model;
     if (!originalModel) {
         res.writeHead(400, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request', message: 'model field is required' } }));
         return;
     }
-    // Strip provider prefix from model name to get the actual model ID
-    const actualModel = originalModel.replace(new RegExp(`^${providerConfig.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), '');
-    const isStream = !!parsed.stream;
+    const actualModel = originalModel.replace(providerConfig.prefixRegex, '');
+    const isStream = !!parsedBody.stream;
 
-    const openAIBody = toOpenAI({ ...parsed, model: actualModel }, providerConfig);
+    const openAIBody = toOpenAI({ ...parsedBody, model: actualModel }, providerConfig);
     const bodyStr = JSON.stringify(openAIBody);
 
     const apiPath = providerConfig.path || '/v1/chat/completions';
@@ -1056,77 +1011,62 @@ function forwardToOpenAIProvider(providerName, providerConfig, req, res, bodyBuf
 
 // ── Fetch JSON helper ───────────────────────────────────────────────────────
 
-function fetchJson(useHttps, options, timeout = 5000) {
+function fetchJson(useHttps, options, timeout = 5000, body = null) {
     return new Promise((resolve, reject) => {
         const transport = useHttps ? https : http;
         const req = transport.request(options, (res) => {
-            let body = '';
-            res.on('data', c => body += c);
+            let data = '';
+            res.on('data', c => data += c);
             res.on('end', () => {
-                try { resolve(JSON.parse(body)); }
-                catch (e) { reject(new Error(`JSON parse: ${body.slice(0, 100)}`)); }
+                try { resolve(JSON.parse(data)); }
+                catch (e) { reject(new Error(`JSON parse: ${data.slice(0, 100)}`)); }
             });
         });
         req.on('error', reject);
         req.setTimeout(timeout, () => { req.destroy(); reject(new Error('timeout')); });
-        req.end();
+        if (body) req.end(body); else req.end();
     });
 }
 
 // ── /v1/models — merged model list from all providers ───────────────────────
 
 async function getMergedModels() {
-    const results = [];
-
-    // Ollama models
-    try {
-        const ollama = await fetchJson(false, {
+    const tasks = [
+        fetchJson(false, {
             hostname: OLLAMA_HOST, port: OLLAMA_PORT,
             path: '/v1/models', method: 'GET',
             headers: { host: `${OLLAMA_HOST}:${OLLAMA_PORT}` },
-        });
-        const models = ollama.data || [];
-        results.push(...models);
-        log(`[Models] ${models.length} from Ollama`);
-    } catch (e) {
-        log(`[Models] Ollama failed: ${e.message}`);
-    }
+        }).then(ollama => {
+            const models = ollama.data || [];
+            log(`[Models] ${models.length} from Ollama`);
+            return models;
+        }).catch(e => { log(`[Models] Ollama failed: ${e.message}`); return []; }),
+    ];
 
-    // OpenAI-compat providers — fetch their model lists and add prefixes
     for (const [name, prov] of Object.entries(CONFIG.providers || {})) {
         const apiKey = process.env[prov.apiKeyEnv];
-        if (!apiKey) continue; // skip providers without API keys
+        if (!apiKey) continue;
 
-        try {
-            // Determine models endpoint
-            let modelsPath = '/v1/models';
-            if (name === 'openrouter') modelsPath = '/api/v1/models';
-            if (name === 'groq') modelsPath = '/openai/v1/models';
+        let modelsPath = '/v1/models';
+        if (name === 'openrouter') modelsPath = '/api/v1/models';
+        if (name === 'groq') modelsPath = '/openai/v1/models';
 
-            const data = await fetchJson(true, {
+        tasks.push(
+            fetchJson(true, {
                 hostname: prov.host, port: 443,
                 path: modelsPath, method: 'GET',
                 protocol: 'https:',
-                headers: {
-                    'authorization': `Bearer ${apiKey}`,
-                    'user-agent': 'cloud-connect/1.0',
-                },
-            });
-
-            const models = (data.data || []).map(m => ({
-                ...m,
-                id: `${prov.prefix}${m.id}`,
-            }));
-
-            // Limit to first 50 models per provider to keep the list manageable
-            const limited = models.slice(0, 50);
-            results.push(...limited);
-            log(`[Models] ${limited.length} from ${name} (${models.length} total)`);
-        } catch (e) {
-            log(`[Models] ${name} failed: ${e.message}`);
-        }
+                headers: { 'authorization': `Bearer ${apiKey}`, 'user-agent': 'cloud-connect/1.0' },
+            }).then(data => {
+                const models = (data.data || []).map(m => ({ ...m, id: `${prov.prefix}${m.id}` }));
+                const limited = models.slice(0, 50);
+                log(`[Models] ${limited.length} from ${name} (${models.length} total)`);
+                return limited;
+            }).catch(e => { log(`[Models] ${name} failed: ${e.message}`); return []; })
+        );
     }
 
+    const results = (await Promise.all(tasks)).flat();
     log(`[Models] Total: ${results.length}`);
     return { data: results, has_more: false, object: 'list' };
 }
@@ -1223,7 +1163,7 @@ const server = http.createServer(async (req, res) => {
 
             // OpenAI-compatible provider
             if (providerConfig) {
-                return forwardToOpenAIProvider(target, providerConfig, req, res, bodyBuffer, parsedBody);
+                return forwardToOpenAIProvider(target, providerConfig, req, res, parsedBody);
             }
 
             // Fallback — shouldn't happen, but route to Ollama
