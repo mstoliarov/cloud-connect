@@ -488,6 +488,29 @@ function toOpenAI(body, providerConfig) {
     return out;
 }
 
+function convertAnthropicToolsToOpenAI(tools) {
+    if (!Array.isArray(tools) || tools.length === 0) return undefined;
+    return tools.map(t => ({
+        type: 'function',
+        function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.input_schema,
+        },
+    }));
+}
+
+function convertToolChoice(choice) {
+    if (!choice || typeof choice !== 'object') return undefined;
+    if (choice.type === 'auto') return 'auto';
+    if (choice.type === 'any') return 'required';
+    if (choice.type === 'none') return 'none';
+    if (choice.type === 'tool' && choice.name) {
+        return { type: 'function', function: { name: choice.name } };
+    }
+    return undefined;
+}
+
 // OpenAI finish_reason → Anthropic stop_reason
 function mapStopReason(reason) {
     if (reason === 'stop') return 'end_turn';
@@ -1266,4 +1289,5 @@ module.exports = {
     normalizeHfWhoami, fetchHuggingFaceUsage,
     normalizeOllamaCloudPlan, fetchOllamaCloudPlan,
     extractContextWindow, fetchContextWindow,
+    convertAnthropicToolsToOpenAI, convertToolChoice,
 };
