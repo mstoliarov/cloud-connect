@@ -384,33 +384,34 @@ async function refreshUsageForProvider(providerId) {
     return usage;
 }
 
-// ── Logging ─────────────────────────────────────────────────────────────────
+// ── Logging (cap at 5 MB) ───────────────────────────────────────────────────
+
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+let _logSize = 0;
+try { _logSize = fs.statSync(LOG_FILE).size; } catch (e) { /* new file */ }
 
 function log(message) {
     const msg = `[${new Date().toISOString()}] ${message}\n`;
-    try { fs.appendFileSync(LOG_FILE, msg); } catch (e) { /* ignore */ }
+    const msgLen = Buffer.byteLength(msg);
+    if (_logSize + msgLen > LOG_MAX_BYTES) {
+        try {
+            const keep = 2 * 1024 * 1024;
+            const existing = fs.readFileSync(LOG_FILE);
+            const trimmed = existing.slice(Math.max(0, existing.length - keep));
+            fs.writeFileSync(LOG_FILE, trimmed);
+            _logSize = trimmed.length;
+            log(`[Log] Rotated — trimmed to last 2 MB`);
+        } catch (e) { /* ignore */ }
+    }
+    try { fs.appendFileSync(LOG_FILE, msg); _logSize += msgLen; } catch (e) { /* ignore */ }
 }
 
 // ── OAuth credentials (cached, with expiry check) ──────────────────────────
 
-let credsCache = { mtimeMs: 0, token: null };
-function getOAuthToken() {
-    try {
-        const stat = fs.statSync(CREDENTIALS_FILE);
-        if (stat.mtimeMs === credsCache.mtimeMs) return credsCache.token;
-        const creds = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'));
-        const token = creds?.claudeAiOauth?.accessToken || null;
-        credsCache = { mtimeMs: stat.mtimeMs, token };
-        return token;
-    } catch (e) {
-        credsCache = { mtimeMs: 0, token: null };
-        return null;
-    }
-}
-
+const OAUTH_CACHE_TTL_MS = 5 * 60 * 1000;
+let _oauthCache = { token: null, expiresAt: 0, readAt: 0 };
 function getOAuthToken() {
     const now = Date.now();
-    // Use cached value if still fresh and not expired
     if (_oauthCache.token && now < _oauthCache.readAt + OAUTH_CACHE_TTL_MS) {
         if (_oauthCache.expiresAt && now >= _oauthCache.expiresAt - 300_000) {
             log('[OAuth] Token expires in <5min — will attempt refresh on 401');
@@ -431,29 +432,6 @@ function getOAuthToken() {
         log(`[OAuth] Failed to read credentials: ${e.message}`);
         return null;
     }
-}
-
-// ── Log rotation (cap at 5 MB) ──────────────────────────────────────────────
-
-const LOG_MAX_BYTES = 5 * 1024 * 1024;
-let _logSize = 0;
-try { _logSize = fs.statSync(LOG_FILE).size; } catch (e) { /* new file */ }
-
-function log(message) {
-    const msg = `[${new Date().toISOString()}] ${message}\n`;
-    const msgLen = Buffer.byteLength(msg);
-    if (_logSize + msgLen > LOG_MAX_BYTES) {
-        try {
-            // Keep last 2 MB on rotation
-            const keep = 2 * 1024 * 1024;
-            const existing = fs.readFileSync(LOG_FILE);
-            const trimmed = existing.slice(Math.max(0, existing.length - keep));
-            fs.writeFileSync(LOG_FILE, trimmed);
-            _logSize = trimmed.length;
-            log(`[Log] Rotated — trimmed to last 2 MB`);
-        } catch (e) { /* ignore */ }
-    }
-    try { fs.appendFileSync(LOG_FILE, msg); _logSize += msgLen; } catch (e) { /* ignore */ }
 }
 
 // ── Model → Provider routing ────────────────────────────────────────────────
