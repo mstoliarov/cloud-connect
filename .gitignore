@@ -1,6 +1,7 @@
 proxy.env
 proxy.log
 proxy_internal.log
+proxy_err.log
 mode.txt
 plan.md
 *.bak

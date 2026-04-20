@@ -240,6 +240,38 @@ Get-Content "$env:USERPROFILE\.claude-provider-proxy\proxy_err.log" -Tail 20 -Wa
 
 ---
 
+## Устранение неполадок (Windows)
+
+### API-ключ не считывается из `proxy.env`
+
+**Симптом:** `/model or-...` возвращает `Authentication failed` или `401`, хотя ключ прописан в `proxy.env`.
+
+**Причина:** при перезапуске Task Scheduler новый процесс не смог занять порт (`EADDRINUSE`) — старый процесс продолжает работать со старыми (пустыми) переменными окружения.
+
+**Решение:**
+
+```powershell
+# 1. Найти PID процесса на порту 11436
+Get-NetTCPConnection -LocalPort 11436 | Select-Object OwningProcess
+
+# 2. Убить процесс (подставить нужный PID)
+Stop-Process -Id <PID> -Force
+
+# 3. Запустить через планировщик
+Start-ScheduledTask -TaskName "CloudConnectProxy" -TaskPath "\CloudConnect\"
+
+# 4. Убедиться, что ключ подхватился (провайдер должен появиться в логе)
+Get-Content "$env:USERPROFILE\.claude-provider-proxy\proxy_internal.log" -Tail 5
+```
+
+> Если процессов node несколько и неясно какой убивать — можно остановить все сразу:
+> ```powershell
+> Get-Process node | Stop-Process -Force
+> Start-ScheduledTask -TaskName "CloudConnectProxy" -TaskPath "\CloudConnect\"
+> ```
+
+---
+
 ## Обновление
 
 ```bash
