@@ -455,6 +455,77 @@ function contentToString(content) {
     return String(content ?? '');
 }
 
+function extractTextFromToolResultContent(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+        return content
+            .filter(b => b.type === 'text')
+            .map(b => b.text)
+            .join('');
+    }
+    return String(content ?? '');
+}
+
+function convertMessages(messages) {
+    const out = [];
+    for (const msg of messages || []) {
+        if (typeof msg.content === 'string') {
+            out.push({ role: msg.role, content: msg.content });
+            continue;
+        }
+        if (!Array.isArray(msg.content)) {
+            out.push({ role: msg.role, content: String(msg.content ?? '') });
+            continue;
+        }
+
+        if (msg.role === 'assistant') {
+            const textParts = [];
+            const toolCalls = [];
+            for (const block of msg.content) {
+                if (block.type === 'text') textParts.push(block.text);
+                else if (block.type === 'tool_use') {
+                    toolCalls.push({
+                        id: block.id,
+                        type: 'function',
+                        function: {
+                            name: block.name,
+                            arguments: JSON.stringify(block.input ?? {}),
+                        },
+                    });
+                }
+            }
+            const text = textParts.join('');
+            const outMsg = { role: 'assistant', content: text || null };
+            if (toolCalls.length > 0) outMsg.tool_calls = toolCalls;
+            out.push(outMsg);
+        } else if (msg.role === 'user') {
+            const textParts = [];
+            for (const block of msg.content) {
+                if (block.type === 'tool_result') {
+                    let content = extractTextFromToolResultContent(block.content);
+                    if (block.is_error) content = '[error] ' + content;
+                    out.push({
+                        role: 'tool',
+                        tool_call_id: block.tool_use_id,
+                        content,
+                    });
+                } else if (block.type === 'text') {
+                    textParts.push(block.text);
+                }
+            }
+            const text = textParts.join('');
+            if (text) out.push({ role: 'user', content: text });
+        } else {
+            const text = msg.content
+                .filter(b => b.type === 'text')
+                .map(b => b.text)
+                .join('');
+            out.push({ role: msg.role, content: text });
+        }
+    }
+    return out;
+}
+
 // Anthropic Messages → OpenAI chat/completions request body
 function toOpenAI(body, providerConfig) {
     const messages = [];
@@ -1289,5 +1360,5 @@ module.exports = {
     normalizeHfWhoami, fetchHuggingFaceUsage,
     normalizeOllamaCloudPlan, fetchOllamaCloudPlan,
     extractContextWindow, fetchContextWindow,
-    convertAnthropicToolsToOpenAI, convertToolChoice,
+    convertAnthropicToolsToOpenAI, convertToolChoice, convertMessages,
 };
