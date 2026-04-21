@@ -592,19 +592,43 @@ function convertToolChoice(choice) {
 function mapStopReason(reason) {
     if (reason === 'stop') return 'end_turn';
     if (reason === 'length') return 'max_tokens';
+    if (reason === 'tool_calls') return 'tool_use';
     return reason || 'end_turn';
+}
+
+function openAIChoiceToAnthropicContent(choice) {
+    const blocks = [];
+    const msg = choice?.message || {};
+    const text = msg.content;
+    if (typeof text === 'string' && text.length > 0) {
+        blocks.push({ type: 'text', text });
+    }
+    const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+    for (const tc of toolCalls) {
+        const rawArgs = tc?.function?.arguments ?? '';
+        let input;
+        try {
+            input = rawArgs ? JSON.parse(rawArgs) : {};
+        } catch (e) {
+            log(`[Warning] malformed tool arguments for ${tc?.function?.name}: ${rawArgs.slice(0, 100)}`);
+            input = {};
+        }
+        blocks.push({ type: 'tool_use', id: tc.id, name: tc?.function?.name, input });
+    }
+    return blocks;
 }
 
 // OpenAI chat/completions response → Anthropic Messages response (non-streaming)
 function fromOpenAI(body, originalModel) {
     const choice = (body.choices || [])[0] || {};
-    const text = choice.message?.content || '';
+    const content = openAIChoiceToAnthropicContent(choice);
+    if (content.length === 0) content.push({ type: 'text', text: '' });
     const usage = body.usage || {};
     return {
         id: body.id || `msg_proxy_${Date.now()}`,
         type: 'message',
         role: 'assistant',
-        content: [{ type: 'text', text }],
+        content,
         model: originalModel,
         stop_reason: mapStopReason(choice.finish_reason),
         stop_sequence: null,
@@ -1367,4 +1391,5 @@ module.exports = {
     normalizeOllamaCloudPlan, fetchOllamaCloudPlan,
     extractContextWindow, fetchContextWindow,
     convertAnthropicToolsToOpenAI, convertToolChoice, convertMessages, toOpenAI,
+    openAIChoiceToAnthropicContent, fromOpenAI,
 };

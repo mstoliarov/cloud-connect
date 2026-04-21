@@ -251,3 +251,68 @@ test('toOpenAI: system prompt still included', () => {
     assert.strictEqual(out.messages[0].role, 'system');
     assert.strictEqual(out.messages[0].content, 'You are helpful.');
 });
+
+const { openAIChoiceToAnthropicContent, fromOpenAI } = require('../proxy.js');
+
+test('openAIChoiceToAnthropicContent: text-only', () => {
+    const choice = { message: { content: 'hello', tool_calls: undefined } };
+    const blocks = openAIChoiceToAnthropicContent(choice);
+    assert.deepStrictEqual(blocks, [{ type: 'text', text: 'hello' }]);
+});
+
+test('openAIChoiceToAnthropicContent: tool_calls only', () => {
+    const choice = { message: {
+        content: null,
+        tool_calls: [{ id: 'c1', function: { name: 'fn', arguments: '{"x":1}' } }],
+    }};
+    const blocks = openAIChoiceToAnthropicContent(choice);
+    assert.deepStrictEqual(blocks, [{ type: 'tool_use', id: 'c1', name: 'fn', input: { x: 1 } }]);
+});
+
+test('openAIChoiceToAnthropicContent: text + tool_calls', () => {
+    const choice = { message: {
+        content: 'looking up',
+        tool_calls: [{ id: 'c1', function: { name: 'fn', arguments: '{}' } }],
+    }};
+    const blocks = openAIChoiceToAnthropicContent(choice);
+    assert.deepStrictEqual(blocks, [
+        { type: 'text', text: 'looking up' },
+        { type: 'tool_use', id: 'c1', name: 'fn', input: {} },
+    ]);
+});
+
+test('openAIChoiceToAnthropicContent: malformed arguments → empty input', () => {
+    const choice = { message: {
+        content: null,
+        tool_calls: [{ id: 'c1', function: { name: 'fn', arguments: 'not json' } }],
+    }};
+    const blocks = openAIChoiceToAnthropicContent(choice);
+    assert.deepStrictEqual(blocks, [{ type: 'tool_use', id: 'c1', name: 'fn', input: {} }]);
+});
+
+test('fromOpenAI: tool_calls → stop_reason tool_use', () => {
+    const body = {
+        id: 'x',
+        choices: [{
+            message: { content: null, tool_calls: [{ id: 'c1', function: { name: 'fn', arguments: '{}' } }] },
+            finish_reason: 'tool_calls',
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+    };
+    const out = fromOpenAI(body, 'groq-x');
+    assert.strictEqual(out.stop_reason, 'tool_use');
+    assert.strictEqual(out.content.length, 1);
+    assert.strictEqual(out.content[0].type, 'tool_use');
+    assert.strictEqual(out.content[0].id, 'c1');
+});
+
+test('fromOpenAI: plain text response unchanged', () => {
+    const body = {
+        id: 'x',
+        choices: [{ message: { content: 'hi', tool_calls: undefined }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+    };
+    const out = fromOpenAI(body, 'm');
+    assert.strictEqual(out.stop_reason, 'end_turn');
+    assert.deepStrictEqual(out.content, [{ type: 'text', text: 'hi' }]);
+});
