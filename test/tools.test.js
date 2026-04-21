@@ -316,3 +316,143 @@ test('fromOpenAI: plain text response unchanged', () => {
     assert.strictEqual(out.stop_reason, 'end_turn');
     assert.deepStrictEqual(out.content, [{ type: 'text', text: 'hi' }]);
 });
+
+const { PassThrough } = require('node:stream');
+const { streamOpenAIToAnthropic } = require('../proxy.js');
+
+function runStream(chunks) {
+    return new Promise((resolve) => {
+        const upstream = new PassThrough();
+        const downstream = new PassThrough();
+        const events = [];
+        let buf = '';
+        downstream.on('data', c => {
+            buf += c.toString();
+            const parts = buf.split('\n\n');
+            buf = parts.pop();
+            for (const p of parts) {
+                const lines = p.split('\n');
+                const evLine = lines.find(l => l.startsWith('event: '));
+                const dataLine = lines.find(l => l.startsWith('data: '));
+                if (evLine && dataLine) {
+                    events.push({
+                        event: evLine.slice(7).trim(),
+                        data: JSON.parse(dataLine.slice(6).trim()),
+                    });
+                }
+            }
+        });
+        downstream.on('end', () => resolve(events));
+        streamOpenAIToAnthropic(upstream, downstream, 'test-model', 'msg_test');
+        for (const c of chunks) upstream.write(c);
+        upstream.end();
+    });
+}
+
+function sseData(obj) { return `data: ${JSON.stringify(obj)}\n\n`; }
+
+test('stream: text-only', async () => {
+    const chunks = [
+        sseData({ choices: [{ delta: { content: 'Hel' } }] }),
+        sseData({ choices: [{ delta: { content: 'lo' } }] }),
+        sseData({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { completion_tokens: 1 } }),
+        'data: [DONE]\n\n',
+    ];
+    const events = await runStream(chunks);
+    const types = events.map(e => e.event);
+    assert.deepStrictEqual(types, [
+        'message_start',
+        'content_block_start',
+        'content_block_delta',
+        'content_block_delta',
+        'content_block_stop',
+        'message_delta',
+        'message_stop',
+    ]);
+    assert.strictEqual(events[1].data.content_block.type, 'text');
+    assert.strictEqual(events[5].data.delta.stop_reason, 'end_turn');
+});
+
+test('stream: tool-only call', async () => {
+    const chunks = [
+        sseData({ choices: [{ delta: { tool_calls: [{
+            index: 0, id: 'call_1', type: 'function',
+            function: { name: 'get_weather', arguments: '' },
+        }]}}]}),
+        sseData({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"city"' } }] } }] }),
+        sseData({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ':"Moscow"}' } }] } }] }),
+        sseData({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        'data: [DONE]\n\n',
+    ];
+    const events = await runStream(chunks);
+    const starts = events.filter(e => e.event === 'content_block_start');
+    assert.strictEqual(starts.length, 1);
+    assert.strictEqual(starts[0].data.content_block.type, 'tool_use');
+    assert.strictEqual(starts[0].data.content_block.id, 'call_1');
+    assert.strictEqual(starts[0].data.content_block.name, 'get_weather');
+
+    const deltas = events.filter(e => e.event === 'content_block_delta');
+    assert.strictEqual(deltas.length, 2);
+    assert.strictEqual(deltas[0].data.delta.type, 'input_json_delta');
+    assert.strictEqual(deltas[0].data.delta.partial_json, '{"city"');
+    assert.strictEqual(deltas[1].data.delta.partial_json, ':"Moscow"}');
+
+    const msgDelta = events.find(e => e.event === 'message_delta');
+    assert.strictEqual(msgDelta.data.delta.stop_reason, 'tool_use');
+});
+
+test('stream: text then tool_call', async () => {
+    const chunks = [
+        sseData({ choices: [{ delta: { content: 'Checking...' } }] }),
+        sseData({ choices: [{ delta: { tool_calls: [{
+            index: 0, id: 'call_1', type: 'function',
+            function: { name: 'fn', arguments: '{}' },
+        }]}}]}),
+        sseData({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        'data: [DONE]\n\n',
+    ];
+    const events = await runStream(chunks);
+    const starts = events.filter(e => e.event === 'content_block_start');
+    const stops = events.filter(e => e.event === 'content_block_stop');
+    assert.strictEqual(starts.length, 2);
+    assert.strictEqual(stops.length, 2);
+    assert.strictEqual(starts[0].data.content_block.type, 'text');
+    assert.strictEqual(starts[0].data.index, 0);
+    assert.strictEqual(starts[1].data.content_block.type, 'tool_use');
+    assert.strictEqual(starts[1].data.index, 1);
+    assert.strictEqual(stops[0].data.index, 0);
+    assert.strictEqual(stops[1].data.index, 1);
+});
+
+test('stream: two parallel tool_calls', async () => {
+    const chunks = [
+        sseData({ choices: [{ delta: { tool_calls: [{
+            index: 0, id: 'c1', type: 'function', function: { name: 'a', arguments: '{}' },
+        }]}}]}),
+        sseData({ choices: [{ delta: { tool_calls: [{
+            index: 1, id: 'c2', type: 'function', function: { name: 'b', arguments: '{}' },
+        }]}}]}),
+        sseData({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        'data: [DONE]\n\n',
+    ];
+    const events = await runStream(chunks);
+    const starts = events.filter(e => e.event === 'content_block_start');
+    assert.strictEqual(starts.length, 2);
+    assert.strictEqual(starts[0].data.content_block.id, 'c1');
+    assert.strictEqual(starts[0].data.index, 0);
+    assert.strictEqual(starts[1].data.content_block.id, 'c2');
+    assert.strictEqual(starts[1].data.index, 1);
+});
+
+test('stream: missing id on first tool_call chunk → fallback id generated', async () => {
+    const chunks = [
+        sseData({ choices: [{ delta: { tool_calls: [{
+            index: 0, type: 'function', function: { name: 'fn', arguments: '{}' },
+        }]}}]}),
+        sseData({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        'data: [DONE]\n\n',
+    ];
+    const events = await runStream(chunks);
+    const start = events.find(e => e.event === 'content_block_start');
+    assert.match(start.data.content_block.id, /^toolu_proxy_/);
+});

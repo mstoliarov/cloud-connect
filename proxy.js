@@ -649,13 +649,73 @@ function emitSSE(res, event, data) {
 function streamOpenAIToAnthropic(upstreamRes, res, originalModel, msgId) {
     let started = false;
     let outputTokens = 0;
+    let inputTokens = 0;
     let stopReason = 'end_turn';
     let buf = '';
+    let currentBlockIdx = -1;
+    let textBlockIdx = -1;
+    let nextBlockIdx = 0;
+    const toolIndexMap = new Map();
+
+    function ensureStarted(promptTokens) {
+        if (started) return;
+        started = true;
+        inputTokens = promptTokens || 0;
+        emitSSE(res, 'message_start', {
+            type: 'message_start',
+            message: {
+                id: msgId, type: 'message', role: 'assistant',
+                content: [], model: originalModel,
+                stop_reason: null, stop_sequence: null,
+                usage: { input_tokens: inputTokens, output_tokens: 0 },
+            },
+        });
+    }
+
+    function closeCurrentBlock() {
+        if (currentBlockIdx === -1) return;
+        emitSSE(res, 'content_block_stop', { type: 'content_block_stop', index: currentBlockIdx });
+        currentBlockIdx = -1;
+    }
+
+    function openTextBlock() {
+        if (textBlockIdx !== -1 && currentBlockIdx === textBlockIdx) return;
+        closeCurrentBlock();
+        if (textBlockIdx === -1) {
+            textBlockIdx = nextBlockIdx++;
+            emitSSE(res, 'content_block_start', {
+                type: 'content_block_start',
+                index: textBlockIdx,
+                content_block: { type: 'text', text: '' },
+            });
+        }
+        currentBlockIdx = textBlockIdx;
+    }
+
+    function openToolBlock(tc) {
+        closeCurrentBlock();
+        const anthropicIdx = nextBlockIdx++;
+        const id = tc.id || `toolu_proxy_${Date.now()}_${anthropicIdx}`;
+        if (!tc.id) log(`[Stream] tool_call missing id at index ${tc.index}, generated ${id}`);
+        toolIndexMap.set(tc.index, { anthropicIdx, argsBuffer: '' });
+        emitSSE(res, 'content_block_start', {
+            type: 'content_block_start',
+            index: anthropicIdx,
+            content_block: {
+                type: 'tool_use',
+                id,
+                name: tc.function?.name || 'unknown',
+                input: {},
+            },
+        });
+        currentBlockIdx = anthropicIdx;
+        return toolIndexMap.get(tc.index);
+    }
 
     upstreamRes.on('data', chunk => {
         buf += chunk.toString();
         const lines = buf.split('\n');
-        buf = lines.pop(); // keep incomplete tail
+        buf = lines.pop();
 
         for (const line of lines) {
             const trimmed = line.trim();
@@ -669,60 +729,60 @@ function streamOpenAIToAnthropic(upstreamRes, res, originalModel, msgId) {
             const choice = (parsed.choices || [])[0];
             if (!choice) continue;
 
-            if (!started) {
-                started = true;
-                emitSSE(res, 'message_start', {
-                    type: 'message_start',
-                    message: {
-                        id: msgId, type: 'message', role: 'assistant',
-                        content: [], model: originalModel,
-                        stop_reason: null, stop_sequence: null,
-                        usage: { input_tokens: parsed.usage?.prompt_tokens || 0, output_tokens: 0 },
-                    },
-                });
-                emitSSE(res, 'content_block_start', {
-                    type: 'content_block_start', index: 0,
-                    content_block: { type: 'text', text: '' },
+            ensureStarted(parsed.usage?.prompt_tokens);
+
+            const delta = choice.delta || {};
+
+            if (typeof delta.content === 'string' && delta.content.length > 0) {
+                openTextBlock();
+                emitSSE(res, 'content_block_delta', {
+                    type: 'content_block_delta',
+                    index: textBlockIdx,
+                    delta: { type: 'text_delta', text: delta.content },
                 });
             }
 
-            const text = choice.delta?.content;
-            if (text) {
-                emitSSE(res, 'content_block_delta', {
-                    type: 'content_block_delta', index: 0,
-                    delta: { type: 'text_delta', text },
-                });
+            if (Array.isArray(delta.tool_calls)) {
+                for (const tc of delta.tool_calls) {
+                    if (typeof tc.index !== 'number') continue;
+                    let entry = toolIndexMap.get(tc.index);
+                    if (!entry) entry = openToolBlock(tc);
+                    const args = tc.function?.arguments;
+                    if (typeof args === 'string' && args.length > 0) {
+                        entry.argsBuffer += args;
+                        emitSSE(res, 'content_block_delta', {
+                            type: 'content_block_delta',
+                            index: entry.anthropicIdx,
+                            delta: { type: 'input_json_delta', partial_json: args },
+                        });
+                    }
+                }
             }
 
             if (choice.finish_reason) {
                 stopReason = mapStopReason(choice.finish_reason);
-                outputTokens = parsed.usage?.completion_tokens || 0;
+                if (parsed.usage?.completion_tokens) outputTokens = parsed.usage.completion_tokens;
             }
         }
     });
 
     upstreamRes.on('end', () => {
         if (!started) {
-            // Empty response — send a minimal valid Anthropic response
-            emitSSE(res, 'message_start', {
-                type: 'message_start',
-                message: {
-                    id: msgId, type: 'message', role: 'assistant',
-                    content: [], model: originalModel,
-                    stop_reason: null, stop_sequence: null,
-                    usage: { input_tokens: 0, output_tokens: 0 },
-                },
-            });
+            ensureStarted(0);
+            textBlockIdx = nextBlockIdx++;
             emitSSE(res, 'content_block_start', {
-                type: 'content_block_start', index: 0,
+                type: 'content_block_start',
+                index: textBlockIdx,
                 content_block: { type: 'text', text: '' },
             });
             emitSSE(res, 'content_block_delta', {
-                type: 'content_block_delta', index: 0,
+                type: 'content_block_delta',
+                index: textBlockIdx,
                 delta: { type: 'text_delta', text: '(empty response from provider)' },
             });
+            currentBlockIdx = textBlockIdx;
         }
-        emitSSE(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
+        closeCurrentBlock();
         emitSSE(res, 'message_delta', {
             type: 'message_delta',
             delta: { stop_reason: stopReason, stop_sequence: null },
@@ -736,22 +796,8 @@ function streamOpenAIToAnthropic(upstreamRes, res, originalModel, msgId) {
         log(`[Stream Error] ${err.message}`);
         if (res.writableEnded) return;
         try {
-            if (!started) {
-                emitSSE(res, 'message_start', {
-                    type: 'message_start',
-                    message: {
-                        id: msgId, type: 'message', role: 'assistant',
-                        content: [], model: originalModel,
-                        stop_reason: null, stop_sequence: null,
-                        usage: { input_tokens: 0, output_tokens: 0 },
-                    },
-                });
-                emitSSE(res, 'content_block_start', {
-                    type: 'content_block_start', index: 0,
-                    content_block: { type: 'text', text: '' },
-                });
-            }
-            emitSSE(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
+            ensureStarted(0);
+            closeCurrentBlock();
             emitSSE(res, 'message_delta', {
                 type: 'message_delta',
                 delta: { stop_reason: 'error', stop_sequence: null },
@@ -1391,5 +1437,5 @@ module.exports = {
     normalizeOllamaCloudPlan, fetchOllamaCloudPlan,
     extractContextWindow, fetchContextWindow,
     convertAnthropicToolsToOpenAI, convertToolChoice, convertMessages, toOpenAI,
-    openAIChoiceToAnthropicContent, fromOpenAI,
+    openAIChoiceToAnthropicContent, fromOpenAI, streamOpenAIToAnthropic,
 };
