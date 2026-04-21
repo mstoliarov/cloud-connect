@@ -185,3 +185,69 @@ test('convertMessages: nested object in tool_use.input serialized correctly', ()
     const out = convertMessages(input);
     assert.strictEqual(out[0].tool_calls[0].function.arguments, '{"nested":{"a":1,"b":[2,3]}}');
 });
+
+const { toOpenAI } = require('../proxy.js');
+
+test('toOpenAI: passes tools array', () => {
+    const body = {
+        model: 'groq-llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: 'Weather in Moscow?' }],
+        tools: [{
+            name: 'get_weather',
+            description: 'Get weather',
+            input_schema: { type: 'object', properties: { city: { type: 'string' } } },
+        }],
+    };
+    const out = toOpenAI(body, null);
+    assert.strictEqual(out.tools.length, 1);
+    assert.strictEqual(out.tools[0].type, 'function');
+    assert.strictEqual(out.tools[0].function.name, 'get_weather');
+});
+
+test('toOpenAI: passes tool_choice', () => {
+    const body = {
+        model: 'm',
+        messages: [{ role: 'user', content: 'go' }],
+        tool_choice: { type: 'any' },
+    };
+    const out = toOpenAI(body, null);
+    assert.strictEqual(out.tool_choice, 'required');
+});
+
+test('toOpenAI: omits tools when empty', () => {
+    const body = { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] };
+    const out = toOpenAI(body, null);
+    assert.strictEqual('tools' in out, false);
+});
+
+test('toOpenAI: assistant tool_use blocks become tool_calls', () => {
+    const body = {
+        model: 'm',
+        messages: [
+            { role: 'user', content: 'go' },
+            { role: 'assistant', content: [
+                { type: 'tool_use', id: 't1', name: 'fn', input: { x: 1 } },
+            ]},
+            { role: 'user', content: [
+                { type: 'tool_result', tool_use_id: 't1', content: 'done' },
+            ]},
+        ],
+    };
+    const out = toOpenAI(body, null);
+    assert.strictEqual(out.messages.length, 3);
+    assert.strictEqual(out.messages[1].role, 'assistant');
+    assert.strictEqual(out.messages[1].tool_calls[0].id, 't1');
+    assert.strictEqual(out.messages[2].role, 'tool');
+    assert.strictEqual(out.messages[2].tool_call_id, 't1');
+});
+
+test('toOpenAI: system prompt still included', () => {
+    const body = {
+        model: 'm',
+        system: 'You are helpful.',
+        messages: [{ role: 'user', content: 'hi' }],
+    };
+    const out = toOpenAI(body, null);
+    assert.strictEqual(out.messages[0].role, 'system');
+    assert.strictEqual(out.messages[0].content, 'You are helpful.');
+});

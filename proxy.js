@@ -539,8 +539,8 @@ function toOpenAI(body, providerConfig) {
         messages.push({ role: 'system', content: sysText });
     }
 
-    for (const msg of (body.messages || [])) {
-        messages.push({ role: msg.role, content: contentToString(msg.content) });
+    for (const m of convertMessages(body.messages || [])) {
+        messages.push(m);
     }
 
     const out = { messages, model: body.model };
@@ -555,6 +555,12 @@ function toOpenAI(body, providerConfig) {
         if (body.stream) out.stream_options = { include_usage: true };
     }
     if (body.stop_sequences) out.stop = body.stop_sequences;
+
+    const tools = convertAnthropicToolsToOpenAI(body.tools);
+    if (tools) out.tools = tools;
+    const toolChoice = convertToolChoice(body.tool_choice);
+    if (toolChoice !== undefined) out.tool_choice = toolChoice;
+
     // thinking / betas are intentionally omitted — providers don't support them
     return out;
 }
@@ -1360,5 +1366,5 @@ module.exports = {
     normalizeHfWhoami, fetchHuggingFaceUsage,
     normalizeOllamaCloudPlan, fetchOllamaCloudPlan,
     extractContextWindow, fetchContextWindow,
-    convertAnthropicToolsToOpenAI, convertToolChoice, convertMessages,
+    convertAnthropicToolsToOpenAI, convertToolChoice, convertMessages, toOpenAI,
 };
