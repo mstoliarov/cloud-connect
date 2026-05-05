@@ -66,6 +66,7 @@ $action = New-ScheduledTaskAction `
     -WorkingDirectory $proxyDir
 
 # Trigger: at logon of current user only
+# (wake-from-sleep/hibernate trigger is added via XML patch after registration — New-ScheduledTaskTrigger doesn't support EventTrigger)
 $trigger = New-ScheduledTaskTrigger -AtLogon -User "$env:USERDOMAIN\$env:USERNAME"
 
 # Settings: no time limit, restart up to 3 times on failure (1-min interval)
@@ -98,6 +99,25 @@ Register-ScheduledTask `
     -Force | Out-Null
 
 Write-Host "[2/3] Task '$taskPath$taskName' registered in Task Scheduler" -ForegroundColor Green
+
+# Add EventTrigger for wake from sleep/hibernate (EventID=1, Power-Troubleshooter)
+# New-ScheduledTaskTrigger doesn't support event-based triggers, so patch via XML.
+$xmlPath = "$env:TEMP\CloudConnectProxy-task.xml"
+Export-ScheduledTask -TaskName $taskName -TaskPath $taskPath | Out-File $xmlPath -Encoding unicode
+[xml]$taskXml = Get-Content $xmlPath -Encoding unicode -Raw
+$ns = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+$et = $taskXml.CreateElement("EventTrigger", $ns)
+$en = $taskXml.CreateElement("Enabled", $ns); $en.InnerText = "true"; $et.AppendChild($en) | Out-Null
+$sb = $taskXml.CreateElement("Subscription", $ns)
+$sb.InnerText = "<QueryList><Query Id='0' Path='System'><Select Path='System'>*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]</Select></Query></QueryList>"
+$et.AppendChild($sb) | Out-Null
+$dl = $taskXml.CreateElement("Delay", $ns); $dl.InnerText = "PT5S"; $et.AppendChild($dl) | Out-Null
+$taskXml.Task.Triggers.AppendChild($et) | Out-Null
+$taskXml.Save($xmlPath)
+Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath `
+    -Xml (Get-Content $xmlPath -Raw) -Force | Out-Null
+Remove-Item $xmlPath
+Write-Host "       Wake-from-sleep trigger added (Power-Troubleshooter EventID=1)" -ForegroundColor Green
 
 # ── 3. Start proxy immediately (don't wait for next logon) ──────────────────
 
