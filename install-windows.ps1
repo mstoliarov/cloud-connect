@@ -111,7 +111,7 @@ $en = $taskXml.CreateElement("Enabled", $ns); $en.InnerText = "true"; $et.Append
 $sb = $taskXml.CreateElement("Subscription", $ns)
 $sb.InnerText = "<QueryList><Query Id='0' Path='System'><Select Path='System'>*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]</Select></Query></QueryList>"
 $et.AppendChild($sb) | Out-Null
-$dl = $taskXml.CreateElement("Delay", $ns); $dl.InnerText = "PT5S"; $et.AppendChild($dl) | Out-Null
+$dl = $taskXml.CreateElement("Delay", $ns); $dl.InnerText = "PT10S"; $et.AppendChild($dl) | Out-Null
 $taskXml.Task.Triggers.AppendChild($et) | Out-Null
 $taskXml.Save($xmlPath)
 Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath `
